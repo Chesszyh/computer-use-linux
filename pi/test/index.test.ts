@@ -12,11 +12,12 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	createComputerUseLinuxExtension,
 	findExecutableOnPath,
+	sanitizeExecutablePath,
 } from "../extension/index.ts";
 import { GENERATED_MCP_TOOLS } from "../extension/generated-tools.ts";
 
@@ -403,6 +404,83 @@ describe("native Pi extension", () => {
 			"warning",
 		);
 	});
+
+	it("passes only absolute PATH entries to the child process", async () => {
+		const absoluteBin = join(agentDir, "bin");
+		vi.stubEnv("COMPUTER_USE_LINUX_BIN", process.execPath);
+		vi.stubEnv(
+			"PATH",
+			["", ".", "relative-bin", absoluteBin].join(delimiter),
+		);
+		const harness = createPi();
+		createComputerUseLinuxExtension({
+			loadClientModule: () => ({
+				ComputerUseMcpClient: FakeMcpClient as never,
+			}),
+		})(harness.pi);
+		await harness.emit("session_start");
+
+		await harness.tools.get("computer_use_linux_doctor")!.execute(
+			"one",
+			{},
+			undefined,
+			undefined,
+			{} as never,
+		);
+
+		expect(FakeMcpClient.instances[0]?.options).toMatchObject({
+			binaryPath: process.execPath,
+			env: { PATH: absoluteBin },
+		});
+	});
+
+	it("uses a safe child PATH fallback when every entry is unsafe", async () => {
+		vi.stubEnv("COMPUTER_USE_LINUX_BIN", process.execPath);
+		vi.stubEnv("PATH", ["", ".", "relative-bin"].join(delimiter));
+		const harness = createPi();
+		createComputerUseLinuxExtension({
+			loadClientModule: () => ({
+				ComputerUseMcpClient: FakeMcpClient as never,
+			}),
+		})(harness.pi);
+		await harness.emit("session_start");
+
+		await harness.tools.get("computer_use_linux_doctor")!.execute(
+			"one",
+			{},
+			undefined,
+			undefined,
+			{} as never,
+		);
+
+		expect(FakeMcpClient.instances[0]?.options).toMatchObject({
+			env: {
+				PATH: ["/usr/local/bin", "/usr/bin", "/bin"].join(delimiter),
+			},
+		});
+	});
+
+	it("ignores a relative executable override", async () => {
+		const relativeOverride = relative(process.cwd(), process.execPath);
+		vi.stubEnv("COMPUTER_USE_LINUX_BIN", relativeOverride);
+		vi.stubEnv("PATH", "relative-bin");
+		const harness = createPi();
+		createComputerUseLinuxExtension({
+			loadClientModule: () => ({
+				ComputerUseMcpClient: FakeMcpClient as never,
+			}),
+		})(harness.pi);
+		await harness.emit("session_start");
+
+		await harness.tools
+			.get("computer_use_linux_doctor")!
+			.execute("one", {}, undefined, undefined, {} as never)
+			.catch(() => undefined);
+
+		expect(FakeMcpClient.instances[0]?.options.binaryPath).not.toBe(
+			relativeOverride,
+		);
+	});
 });
 
 describe("findExecutableOnPath", () => {
@@ -425,7 +503,7 @@ describe("findExecutableOnPath", () => {
 	it("returns the first executable in PATH order", () => {
 		const first = script(join(root, "a"), 0o755);
 		script(join(root, "b"), 0o755);
-		const path = [join(root, "a"), join(root, "b")].join(":");
+		const path = [join(root, "a"), join(root, "b")].join(delimiter);
 		expect(findExecutableOnPath(path, "computer-use-linux")).toBe(first);
 	});
 
@@ -433,8 +511,37 @@ describe("findExecutableOnPath", () => {
 		script(join(root, "noexec"), 0o644);
 		mkdirSync(join(root, "dir", "computer-use-linux"), { recursive: true });
 		const wanted = script(join(root, "ok"), 0o755);
-		const path = ["", join(root, "noexec"), join(root, "dir"), "", join(root, "ok")].join(":");
+		const path = [
+			"",
+			join(root, "noexec"),
+			join(root, "dir"),
+			"",
+			join(root, "ok"),
+		].join(delimiter);
 		expect(findExecutableOnPath(path, "computer-use-linux")).toBe(wanted);
+	});
+
+	it("skips relative PATH entries", () => {
+		const wanted = script(join(root, "ok"), 0o755);
+		const checked: string[] = [];
+		const path = [".", "relative-bin", join(root, "ok")].join(delimiter);
+
+		expect(
+			findExecutableOnPath(path, "computer-use-linux", (candidate) => {
+				checked.push(candidate);
+				return candidate === wanted;
+			}),
+		).toBe(wanted);
+		expect(checked).toEqual([wanted]);
+	});
+
+	it("sanitizes PATH lists to absolute entries", () => {
+		const path = ["", ".", "relative-bin", "/usr/bin", "/bin"].join(
+			delimiter,
+		);
+		expect(sanitizeExecutablePath(path)).toBe(
+			["/usr/bin", "/bin"].join(delimiter),
+		);
 	});
 
 	it("returns null when nothing on PATH matches", () => {
@@ -442,4 +549,3 @@ describe("findExecutableOnPath", () => {
 		expect(findExecutableOnPath(undefined, "computer-use-linux")).toBeNull();
 	});
 });
-

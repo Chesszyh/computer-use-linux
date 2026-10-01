@@ -38,8 +38,7 @@ use std::{
     env,
     ffi::OsString,
     future::Future,
-    os::unix::net::UnixDatagram,
-    path::{Path, PathBuf},
+    path::Path,
     process::{Command, Output, Stdio},
     sync::{Arc, Mutex},
     time::Duration,
@@ -52,6 +51,7 @@ use xkeysym::key as xkey;
 use zbus::{Connection as ZbusConnection, Proxy as ZbusProxy};
 
 const INPUT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_SCROLL_PAGES: f64 = 100.0;
 const YDOTOOL_TYPE_CHARS_PER_SECOND: u64 = 20;
 const KDE_CLIPBOARD_DBUS_TIMEOUT: Duration = Duration::from_secs(3);
 const KDE_KLIPPER_SERVICE: &str = "org.kde.klipper";
@@ -1108,9 +1108,20 @@ impl ComputerUseLinux {
     )]
     async fn scroll(&self, Parameters(mut params): Parameters<ScrollParams>) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params.clone()));
+        let units = match scroll_units(params.pages) {
+            Ok(units) => units,
+            Err(message) => {
+                return Json(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "scroll".to_string(),
+                    message,
+                    received,
+                });
+            }
+        };
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let mut portal_target_point = None;
-        let units = ((params.pages.unwrap_or(1.0).abs().max(0.1) * 5.0).round() as i32).max(1);
         let mut target_pid = params.pid;
         // Raise/focus the target window first (parity with click) so wheel
         // events land on the intended app.
@@ -2775,6 +2786,7 @@ struct ScrollParams {
     y: Option<i32>,
     direction: String,
     #[serde(default)]
+    #[schemars(range(min = -100, max = 100))]
     pages: Option<f64>,
     // Optional window target (parity with click): the window is raised/focused
     // before scrolling so the wheel events land on the intended app.
@@ -2794,6 +2806,16 @@ struct ScrollParams {
     /// Requires a window target; missing targets are rejected.
     #[serde(default)]
     relative: Option<bool>,
+}
+
+fn scroll_units(pages: Option<f64>) -> std::result::Result<i32, String> {
+    let pages = pages.unwrap_or(1.0);
+    if !pages.is_finite() || pages.abs() > MAX_SCROLL_PAGES {
+        return Err(format!(
+            "pages must be finite and have an absolute value no greater than {MAX_SCROLL_PAGES}"
+        ));
+    }
+    Ok(((pages.abs().max(0.1) * 5.0).round() as i32).max(1))
 }
 
 impl ScrollParams {
@@ -4903,9 +4925,9 @@ fn xdotool_pointer_button_code(button: Option<&str>) -> Option<&'static str> {
 
 /// Gap between XTEST wheel-button clicks, in milliseconds.
 ///
-/// xdotool's own default is 100ms. One page is five clicks and `pages` is
-/// not capped, so that default blows the flat input timeout past about 20
-/// pages. 12ms is the same pacing as `xdotool type`.
+/// xdotool's own default is 100ms. One page is five clicks and valid requests
+/// can ask for up to 100 pages, so 12ms keeps the bounded operation responsive
+/// while matching the pacing used by `xdotool type`.
 const XDOTOOL_SCROLL_CLICK_DELAY_MS: u64 = 12;
 
 /// X11 wheel buttons: 4 up, 5 down, 6 left, 7 right. `repeat` is the notch
@@ -5082,11 +5104,10 @@ where
 
 async fn run_ydotool(args: &[String]) -> std::result::Result<Output, String> {
     let support = ydotool::ensure_supported_async().await?;
+    let socket = ydotool::socket_path_for_command()?;
     let mut command = TokioCommand::new(&support.executable);
     command.args(args);
-    if let Some(socket) = ydotool_socket() {
-        command.env("YDOTOOL_SOCKET", socket);
-    }
+    command.env("YDOTOOL_SOCKET", socket);
     let output =
         crate::command_runner::output_with_timeout(command, "run ydotool", INPUT_COMMAND_TIMEOUT)
             .await
@@ -5104,11 +5125,10 @@ async fn run_ydotool(args: &[String]) -> std::result::Result<Output, String> {
 
 async fn run_ydotool_type_text(text: &str) -> std::result::Result<Output, String> {
     let support = ydotool::ensure_supported_async().await?;
+    let socket = ydotool::socket_path_for_command()?;
     let mut command = TokioCommand::new(&support.executable);
     command.args(["type", "--file", "-"]);
-    if let Some(socket) = ydotool_socket() {
-        command.env("YDOTOOL_SOCKET", socket);
-    }
+    command.env("YDOTOOL_SOCKET", socket);
     let output = crate::command_runner::output_with_stdin(
         command,
         "run ydotool type",
@@ -5665,27 +5685,11 @@ fn command_output_error(command: &str, output: Output) -> String {
     }
 }
 
-fn ydotool_socket() -> Option<String> {
-    if let Some(socket) = explicit_ydotool_socket() {
-        return Some(socket);
-    }
-
-    connectable_ydotool_socket_from(fallback_ydotool_socket_candidates())
-        .map(|path| path.display().to_string())
-}
-
 async fn ydotool_backend_available() -> bool {
     ydotool_backend_available_from(
-        ydotool_socket_connectable(),
+        ydotool::connectable_socket_path().is_ok(),
         ydotool::ensure_supported_async().await.is_ok(),
     )
-}
-
-fn ydotool_socket_connectable() -> bool {
-    if let Some(socket) = explicit_ydotool_socket() {
-        return ydotool_socket_connects(&PathBuf::from(socket));
-    }
-    connectable_ydotool_socket_from(fallback_ydotool_socket_candidates()).is_some()
 }
 
 fn ydotool_backend_available_from(socket_available: bool, cli_supported: bool) -> bool {
@@ -5694,39 +5698,6 @@ fn ydotool_backend_available_from(socket_available: bool, cli_supported: bool) -
 
 fn should_prefer_portal_backend_by_default(is_wayland: bool, ydotool_available: bool) -> bool {
     is_wayland && !ydotool_available
-}
-
-fn explicit_ydotool_socket() -> Option<String> {
-    if let Ok(socket) = env::var("YDOTOOL_SOCKET") {
-        let socket = socket.trim();
-        if !socket.is_empty() {
-            return Some(socket.to_string());
-        }
-    }
-    None
-}
-
-fn fallback_ydotool_socket_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(runtime) = env::var("XDG_RUNTIME_DIR")
-        .ok()
-        .map(PathBuf::from)
-        .or_else(|| user_id().map(|uid| PathBuf::from(format!("/run/user/{uid}"))))
-    {
-        candidates.push(runtime.join(".ydotool_socket"));
-    }
-    candidates.push(PathBuf::from("/tmp/.ydotool_socket"));
-    candidates
-}
-
-fn connectable_ydotool_socket_from(candidates: Vec<PathBuf>) -> Option<PathBuf> {
-    candidates.into_iter().find(ydotool_socket_connects)
-}
-
-fn ydotool_socket_connects(path: &PathBuf) -> bool {
-    UnixDatagram::unbound()
-        .and_then(|socket| socket.connect(path))
-        .is_ok()
 }
 
 fn mouse_button_code(button: Option<&str>) -> String {
@@ -5945,15 +5916,6 @@ fn keycode_for_ascii(value: char) -> Option<u16> {
         '0' => Some(11),
         _ => None,
     }
-}
-
-fn user_id() -> Option<String> {
-    let output = Command::new("id").arg("-u").output().ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 fn list_process_apps() -> Vec<AppCandidate> {
@@ -7600,6 +7562,38 @@ mod tests {
     }
 
     #[test]
+    fn scroll_pages_are_bounded_before_unit_conversion() {
+        assert_eq!(scroll_units(None).unwrap(), 5);
+        assert_eq!(scroll_units(Some(1.0)).unwrap(), 5);
+        assert_eq!(scroll_units(Some(-1.0)).unwrap(), 5);
+        assert_eq!(scroll_units(Some(0.0)).unwrap(), 1);
+        assert_eq!(scroll_units(Some(0.1)).unwrap(), 1);
+        assert_eq!(scroll_units(Some(100.0)).unwrap(), 500);
+        assert_eq!(scroll_units(Some(-100.0)).unwrap(), 500);
+
+        for pages in [
+            100.000_001,
+            -100.000_001,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            assert!(scroll_units(Some(pages)).is_err(), "accepted {pages}");
+        }
+    }
+
+    #[test]
+    fn maximum_scroll_timeout_is_bounded() {
+        let repeat = u32::try_from(scroll_units(Some(MAX_SCROLL_PAGES)).unwrap()).unwrap();
+
+        assert_eq!(repeat, 500);
+        assert_eq!(
+            xdotool_scroll_timeout(repeat, XDOTOOL_SCROLL_CLICK_DELAY_MS),
+            Duration::from_secs(16)
+        );
+    }
+
+    #[test]
     fn xdotool_scroll_timeout_covers_the_gap_after_every_click() {
         assert_eq!(
             xdotool_scroll_timeout(1, 12),
@@ -8127,47 +8121,6 @@ mod tests {
     }
 
     #[test]
-    fn ydotool_socket_selection_rejects_legacy_stream_socket() {
-        let dir =
-            std::env::temp_dir().join(format!("computer-use-linux-server-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create temp server dir");
-        let stale_socket = dir.join("stale.sock");
-        std::fs::write(&stale_socket, b"not a socket").expect("write stale socket placeholder");
-        let usable_socket = dir.join("usable.sock");
-        let listener =
-            std::os::unix::net::UnixListener::bind(&usable_socket).expect("bind usable socket");
-
-        let selected = connectable_ydotool_socket_from(vec![stale_socket, usable_socket.clone()]);
-
-        assert!(selected.is_none());
-        drop(listener);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn ydotool_socket_selection_accepts_datagram_socket() {
-        let dir = std::env::temp_dir().join(format!(
-            "computer-use-linux-server-dgram-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create temp server dir");
-        let stale_socket = dir.join("stale.sock");
-        std::fs::write(&stale_socket, b"not a socket").expect("write stale socket placeholder");
-        let usable_socket = dir.join("usable.sock");
-        let datagram =
-            std::os::unix::net::UnixDatagram::bind(&usable_socket).expect("bind usable socket");
-
-        let selected = connectable_ydotool_socket_from(vec![stale_socket, usable_socket.clone()])
-            .expect("usable socket should be selected");
-
-        assert_eq!(selected, usable_socket);
-        drop(datagram);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn perform_action_defaults_to_primary_action_index() {
         assert_eq!(requested_or_primary_action(None), "0");
         assert_eq!(requested_or_primary_action(Some("   ")), "0");
@@ -8175,15 +8128,6 @@ mod tests {
             requested_or_primary_action(Some(" show-menu ")),
             "show-menu"
         );
-    }
-
-    #[test]
-    fn explicit_ydotool_socket_is_used_without_connectability_probe() {
-        let _guard = EnvVarGuard::set("YDOTOOL_SOCKET", " /does/not/exist.sock ");
-
-        let selected = explicit_ydotool_socket();
-
-        assert_eq!(selected.as_deref(), Some("/does/not/exist.sock"));
     }
 
     #[test]

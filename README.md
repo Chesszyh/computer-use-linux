@@ -417,6 +417,7 @@ Most setups need none of these — `doctor` and the installers pick sensible def
 | `COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER` / `…_KEYBOARD` | Always route pointer / keyboard through the RemoteDesktop portal on Wayland, skipping auto-detection. |
 | `COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP` | Set exactly to `1` to ask the RemoteDesktop portal to remember pointer and keyboard grants across processes. The first dialog still appears (on GNOME the remember box starts checked). Later processes reuse the single-use restore token from `Start`, stored mode `0600` under `$XDG_STATE_HOME/computer-use-linux/` (or `~/.local/state/computer-use-linux/`). Pointer and keyboard tokens are separate. Needs interface version 2. Unset, every new process is prompted. No effect when input is not using the portal. |
 | `COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER` / `…_KEYBOARD` | Always route pointer / keyboard through `ydotool`, skipping the portal and KDE clipboard paths; pointer forcing also skips native-X11 `xdotool` coordinate clicks and scrolls. |
+| `YDOTOOL_SOCKET` | Explicit ydotool socket path. When unset, only an owner-only `.ydotool_socket` in the user's private runtime directory is accepted; the legacy shared `/tmp/.ydotool_socket` is never selected automatically. Setting this variable is an operator trust override for custom layouts. |
 | `COMPUTER_USE_LINUX_FORCE_XDOTOOL_KEYBOARD` | Prefer `xdotool`/XTEST keyboard input when `DISPLAY` is available. `COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD=1` takes precedence. |
 | `COMPUTER_USE_LINUX_XDOTOOL_TYPE_DELAY_MS` | Per-character delay for `xdotool type` in milliseconds (default `12`). `0` is faster but can deliver characters out of order on some X servers. |
 | `COMPUTER_USE_LINUX_SCREENSHOT_BACKEND` | Force a single screenshot backend, skipping the fallback chain. Accepts `gnome-shell`, `portal`, `x11`, or `gnome-screenshot`. `x11` works only on a native X11 session. Pin `gnome-screenshot` for background/systemd contexts where the GNOME Shell and portal DBus paths are denied. |
@@ -432,7 +433,7 @@ files.
 
 | Variable | Effect |
 | --- | --- |
-| `COMPUTER_USE_LINUX_BIN` | Run this binary instead of the one bundled by the npm package. |
+| `COMPUTER_USE_LINUX_BIN` | Run this absolute binary path instead of the one bundled by the npm package. Relative paths are ignored. |
 | `COMPUTER_USE_LINUX_DOWNLOAD_BASE` | Override the GitHub release base URL the installer downloads from (mirrors, air-gapped hosts). |
 | `COMPUTER_USE_LINUX_SKIP_DOWNLOAD=1` | Skip the post-install binary download entirely. |
 | `COMPUTER_USE_LINUX_LOCAL_BINARY` / `…_LOCAL_COSMIC_HELPER` | Install from a local build instead of downloading (used by CI and local testing). |
