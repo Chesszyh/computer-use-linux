@@ -9,7 +9,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     env, fs,
     fs::OpenOptions,
-    os::unix::{fs::MetadataExt, net::UnixDatagram},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -1048,32 +1048,11 @@ fn dbus_session_address() -> Option<String> {
         })
 }
 
-fn ydotool_socket_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(value) = env_var("YDOTOOL_SOCKET") {
-        candidates.push(PathBuf::from(value));
-    }
-
-    if let Some(runtime_socket) = xdg_runtime_dir().map(|runtime| runtime.join(".ydotool_socket")) {
-        candidates.push(runtime_socket);
-    }
-    candidates.push(PathBuf::from("/tmp/.ydotool_socket"));
-    candidates
-}
-
 fn ydotool_socket_check() -> Check {
-    let mut checked = Vec::new();
-    for candidate in ydotool_socket_candidates() {
-        match socket_connect_result(&candidate) {
-            Ok(()) => return Check::ok(format!("connectable: {}", candidate.display())),
-            Err(detail) => checked.push(detail),
-        }
+    match ydotool::connectable_socket_path() {
+        Ok(path) => Check::ok(format!("connectable: {}", path.display())),
+        Err(detail) => Check::fail(format!("no trusted connectable ydotool socket ({detail})")),
     }
-
-    Check::fail(format!(
-        "no connectable ydotool socket ({})",
-        checked.join("; ")
-    ))
 }
 
 fn user_id() -> Option<String> {
@@ -1152,12 +1131,13 @@ fn socket_connect_check(path: &Path) -> Check {
     }
 }
 
+#[cfg(test)]
 fn socket_connect_result(path: &Path) -> std::result::Result<(), String> {
     if !path.exists() {
         return Err(format!("missing: {}", path.display()));
     }
 
-    UnixDatagram::unbound()
+    std::os::unix::net::UnixDatagram::unbound()
         .and_then(|socket| socket.connect(path))
         .map_err(|error| format!("{}: datagram: {error}", path.display()))
 }

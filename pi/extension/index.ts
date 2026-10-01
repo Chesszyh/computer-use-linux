@@ -22,7 +22,7 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, isAbsolute, join } from "node:path";
 import { Type, type TSchema } from "typebox";
 import {
 	GENERATED_MCP_TOOLS,
@@ -47,6 +47,7 @@ const DEFAULT_TOOLS = [
 const MAX_RESULT_TEXT_CHARS = 200_000;
 const MAX_RESULT_IMAGE_BYTES = 2 * 1024 * 1024;
 const MAX_RESULT_IMAGES = 4;
+const SAFE_CHILD_PATH = ["/usr/local/bin", "/usr/bin", "/bin"].join(delimiter);
 const TRUNCATION_NOTICE =
 	"[Result truncated by the Pi extension. Request a smaller/bounded result.]";
 const SHELL_ENABLED = process.env.COMPUTER_USE_LINUX_ENABLE_SHELL === "1";
@@ -164,16 +165,23 @@ function executable(path: string): boolean {
 	}
 }
 
+export function sanitizeExecutablePath(pathValue: string | undefined): string {
+	return (pathValue ?? "")
+		.split(delimiter)
+		.filter((dir) => dir.length > 0 && isAbsolute(dir))
+		.join(delimiter);
+}
+
 /**
- * First executable `name` in a PATH-style list, or `null`. Empty segments are
- * skipped rather than read as the current directory.
+ * First executable `name` in a PATH-style list, or `null`. Empty and relative
+ * segments are skipped rather than read relative to the current directory.
  */
 export function findExecutableOnPath(
 	pathValue: string | undefined,
 	name: string,
 	isExecutable: (path: string) => boolean = executable,
 ): string | null {
-	for (const dir of (pathValue ?? "").split(delimiter)) {
+	for (const dir of sanitizeExecutablePath(pathValue).split(delimiter)) {
 		if (!dir) continue;
 		const candidate = join(dir, name);
 		if (isExecutable(candidate)) return candidate;
@@ -228,19 +236,24 @@ function runtimeEnvironment(): Record<string, string> {
 		"COMPUTER_USE_LINUX_SCREENSHOT_BACKEND",
 		"CU_DISABLE_ABS_POINTER",
 	]);
-	return Object.fromEntries(
+	const env = Object.fromEntries(
 		Object.entries(process.env).filter(
 			(entry): entry is [string, string] =>
 				typeof entry[1] === "string" &&
 				(allowed.has(entry[0]) || entry[0].startsWith("LC_")),
 		),
 	);
+	const sanitizedPath = sanitizeExecutablePath(env.PATH);
+	env.PATH = sanitizedPath || SAFE_CHILD_PATH;
+	return env;
 }
 
 function defaultFindBinary(): BinaryLaunch | null {
 	const env = runtimeEnvironment();
 	const override = process.env.COMPUTER_USE_LINUX_BIN?.trim();
-	if (override && executable(override)) {
+	// Relative overrides would be resolved from Pi's potentially untrusted
+	// project directory. Ignore them and continue with bundled/global discovery.
+	if (override && isAbsolute(override) && executable(override)) {
 		return { binaryPath: override, env };
 	}
 

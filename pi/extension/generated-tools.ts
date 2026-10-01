@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.8";
-export const GENERATED_TOOL_CATALOG_HASH = "24c86d5a758f000674ea2a44d843779d7af28f75d57ce8c401bb01215a61d9fc";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "08ebd9d8ed7177921c880a99ca5ce13ab1fcad6c88bec61dff93019a84fabcd2";
+export const GENERATED_TOOL_CATALOG_HASH = "b65768d5f3112b43fcde1344223f5354557c871969987a0a49b58ebe5605eb70";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "984f033a6045848f85209b7e74bf881f7810bcfe1fce820e2c3967fee52a6714";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -1030,6 +1030,8 @@ export const GENERATED_MCP_TOOLS =
         "pages": {
           "default": null,
           "format": "double",
+          "maximum": 100,
+          "minimum": -100,
           "type": [
             "number",
             "null"
