@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.10] - 2026-10-01
+
+### Security
+- COSMIC targeted input trusts compositor-reported focus rather than an
+  activation cache, and no longer writes focus state into a shared temporary
+  file. GNOME extension calls verify the unique owner of `org.gnome.Shell`. (#215)
+- Portal responses are bound to the expected sender and request path.
+  Screenshot files reject symlinks and non-regular files and enforce byte and
+  decoded-pixel limits before processing. (#215)
+- Automatic ydotool discovery accepts only private, same-user sockets and
+  no longer falls back to shared `/tmp` sockets. The installer creates a
+  mode-0600 daemon socket; `YDOTOOL_SOCKET` remains an explicit override. (#215)
+- Scroll amounts must be finite and within -100 to 100 before input locks
+  are taken. Pi executable and PATH overrides must use absolute paths. (#215)
+
+### Fixed
+- MCP safety checks recognize npm launcher error output without weakening
+  the failure assertions. (#214)
+
 ## [0.7.9] - 2026-10-01
 
 ### Fixed
@@ -732,7 +751,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.9...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.10...HEAD
+[0.7.10]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.9...v0.7.10
 [0.7.9]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.8...v0.7.9
 [0.7.8]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.7...v0.7.8
 [0.7.7]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.6...v0.7.7
