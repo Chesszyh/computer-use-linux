@@ -513,10 +513,16 @@ fn client_socket() -> Option<UnixDatagram> {
 /// password field (`password text`, or the `PasswordText` fallback name), or
 /// a role that could not be read and so might be one.
 pub(crate) fn is_secret_role(role: &str) -> bool {
+    // Generic enum fallback names do not establish whether an editable field
+    // obscures input. GTK's fresh "text box" role is similarly ambiguous.
+    if matches!(role.trim(), "Entry" | "Text") {
+        return true;
+    }
     let role = role.trim().to_ascii_lowercase();
     role.is_empty()
         || role == crate::atspi_tree::UNKNOWN_ROLE
         || role == "invalid"
+        || matches!(role.as_str(), "text box" | "textbox" | "terminal")
         || role.contains("password")
 }
 
@@ -581,6 +587,23 @@ mod tests {
         assert!(is_secret_role("Unknown"));
         assert!(is_secret_role("Invalid"));
         assert!(is_secret_role(" "));
+    }
+
+    #[test]
+    fn generic_text_boxes_do_not_establish_password_safety() {
+        // GTK exposes obscured entries with the same text-box role as public
+        // entries. A successful role read does not establish clear-text input.
+        assert!(is_secret_role("text box"));
+        assert!(is_secret_role("TextBox"));
+    }
+
+    #[test]
+    fn enum_fallback_text_and_terminal_roles_are_masked() {
+        assert!(is_secret_role("Entry"));
+        assert!(is_secret_role("Text"));
+        assert!(is_secret_role("terminal"));
+        // A fresh non-generic role read keeps the original public-text path.
+        assert!(!is_secret_role("entry"));
     }
 
     /// A sender talking to a stand-in overlay at `path`.

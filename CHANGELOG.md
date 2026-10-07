@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Mask generic text-box roles, terminal focus and generic enum fallback roles in typed text and keycaps. GTK obscured entries can advertise the same text-box role as public entries.
+
 ### Added
 - On-screen indicator, on by default: `computer-use-linux-indicator` draws a
   software cursor that glides to coordinate pointer targets and ripples on
