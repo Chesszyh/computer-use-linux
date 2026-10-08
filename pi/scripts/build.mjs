@@ -9,7 +9,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const piRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const entryPoint = join(piRoot, "extension", "mcp-client.ts");
+const entryPoint = join(piRoot, "extension", "client-api.ts");
 const bundlePath = join(piRoot, "extension", "mcp-client.bundle.cjs");
 const noticesPath = join(piRoot, "extension", "THIRD_PARTY_NOTICES.txt");
 const check = process.argv.includes("--check");

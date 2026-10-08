@@ -82,6 +82,21 @@ Targeted `press_key`/`type_text` results append focused-element feedback from AT
 
 On GNOME, a read-only keymap preflight rejects the whole string before input if a character is absent or requires a modifier level Mutter cannot synthesize. The background reader cannot establish the active layout group, so every configured group must support the text. This can reject text that works in one of several groups; use `set_value` on an editable field instead. The check requires `libxkbcommon.so.0` at runtime and stops after a two-second keymap read deadline. It does not cover held modifiers or a keymap changed concurrently with typing.
 
+**Application workflows**
+
+- `select_text` — select a text occurrence or position the caret; element-targeted `type_text` inserts without activating the window
+- `paste` — paste text and optional HTML while restoring the previous Wayland clipboard formats
+- `list_launchable_apps` / `launch_app` — discover and launch installed desktop entries
+- `wait_for` — wait for a specific accessibility state
+- `perform_actions` — run ordered actions, stopping on failure, with an optional final observation
+- `reset_session` — release observation and input sessions
+
+`get_app_state` supports per-target diffs with stable element identities. Hyprland
+window capture and key chords support background operation. A persistent
+JavaScript application API is exported as `@agent-sh/computer-use-linux/cua`.
+See [Desktop interaction](docs/desktop-control.md) for parameters, examples,
+coordinate spaces and the live verification command.
+
 **Semantic actions**
 
 - `perform_action` — invoke any AT-SPI action exposed by an element (`Press`, `Activate`, `Toggle`, …); defaults to the primary action

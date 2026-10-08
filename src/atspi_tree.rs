@@ -12,7 +12,7 @@ use atspi::{
 use atspi_connection::AccessibilityConnection;
 use futures_util::{stream, StreamExt};
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::VecDeque, future::Future, time::Duration};
 use tokio::time::timeout;
 use zbus::{
@@ -31,7 +31,7 @@ pub struct AccessibleAppSummary {
     pub bounds: Option<Bounds>,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct AccessibilityNode {
     pub index: u32,
     pub parent_index: Option<u32>,
@@ -49,7 +49,7 @@ pub struct AccessibilityNode {
     pub supports_editable_text: bool,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct Bounds {
     pub x: i32,
     pub y: i32,
@@ -57,7 +57,7 @@ pub struct Bounds {
     pub height: i32,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct AccessibilityAction {
     pub index: i32,
     pub name: String,
@@ -65,7 +65,7 @@ pub struct AccessibilityAction {
     pub keybinding: String,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct AccessibilityValue {
     pub current: f64,
     pub minimum: f64,
@@ -74,7 +74,7 @@ pub struct AccessibilityValue {
     pub text: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct AccessibilityText {
     pub character_count: i32,
     pub caret_offset: Option<i32>,
@@ -83,7 +83,7 @@ pub struct AccessibilityText {
     pub selections: Vec<AccessibilityTextSelection>,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct AccessibilityTextSelection {
     pub start_offset: i32,
     pub end_offset: i32,
@@ -100,6 +100,182 @@ pub struct ActionInvocation {
 pub enum ValueSetInvocation {
     Numeric { value: f64 },
     EditableText,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectionType {
+    #[default]
+    Text,
+    CursorBefore,
+    CursorAfter,
+}
+
+fn matching_text_range(
+    content: &str,
+    text: &str,
+    prefix: Option<&str>,
+    suffix: Option<&str>,
+) -> Result<(i32, i32)> {
+    anyhow::ensure!(!text.is_empty(), "Text to select must not be empty.");
+    let matches: Vec<_> = content
+        .char_indices()
+        .filter_map(|(start, _)| {
+            let rest = &content[start..];
+            if !rest.starts_with(text) {
+                return None;
+            }
+            let end = start + text.len();
+            if prefix.is_some_and(|p| !content[..start].ends_with(p))
+                || suffix.is_some_and(|s| !content[end..].starts_with(s))
+            {
+                return None;
+            }
+            Some((
+                content[..start].chars().count() as i32,
+                content[..end].chars().count() as i32,
+            ))
+        })
+        .collect();
+    match matches.as_slice() {
+        [range] => Ok(*range),
+        [] => Err(anyhow!(
+            "Text was not found in the target element with the supplied prefix/suffix."
+        )),
+        _ => Err(anyhow!(
+            "Text matches {} places; supply prefix or suffix to select one occurrence.",
+            matches.len()
+        )),
+    }
+}
+
+pub async fn select_element_text(
+    object_ref_id: &str,
+    text: &str,
+    prefix: Option<&str>,
+    suffix: Option<&str>,
+    selection_type: SelectionType,
+) -> Result<AccessibilityTextSelection> {
+    let conn = connect().await?;
+    let object_ref = object_ref_from_id(object_ref_id)?;
+    let accessible = open_accessible(&conn, &object_ref).await?;
+    let proxies = accessible.proxies().await?;
+    let proxy = proxies
+        .text()
+        .await
+        .context("Target does not expose AT-SPI Text.")?;
+    let content = proxy.get_text(0, proxy.character_count().await?).await?;
+    let (start, end) = matching_text_range(&content, text, prefix, suffix)?;
+    let (start, end) = match selection_type {
+        SelectionType::Text => (start, end),
+        SelectionType::CursorBefore => (start, start),
+        SelectionType::CursorAfter => (end, end),
+    };
+    let count = proxy
+        .inner()
+        .call::<_, _, i32>("GetNSelections", &())
+        .await?;
+    let ok = if start == end {
+        for index in (0..count).rev() {
+            anyhow::ensure!(
+                proxy.remove_selection(index).await?,
+                "Target rejected clearing its selection."
+            );
+        }
+        proxy.set_caret_offset(start).await?
+    } else if count > 0 {
+        for index in (1..count).rev() {
+            proxy.remove_selection(index).await?;
+        }
+        proxy.set_selection(0, start, end).await?
+    } else {
+        proxy.add_selection(start, end).await?
+    };
+    anyhow::ensure!(ok, "Target rejected the requested text selection.");
+    if start == end {
+        anyhow::ensure!(
+            proxy.caret_offset().await? == start,
+            "Target did not move its caret to the requested offset."
+        );
+    } else {
+        anyhow::ensure!(
+            proxy.get_selection(0).await? == (start, end),
+            "Target did not retain the requested text selection."
+        );
+    }
+    Ok(AccessibilityTextSelection {
+        start_offset: start,
+        end_offset: end,
+    })
+}
+
+pub async fn insert_element_text(object_ref_id: &str, text: &str) -> Result<()> {
+    let conn = connect().await?;
+    let object_ref = object_ref_from_id(object_ref_id)?;
+    let accessible = open_accessible(&conn, &object_ref).await?;
+    let proxies = accessible.proxies().await?;
+    let editable = proxies
+        .editable_text()
+        .await
+        .context("Target does not expose AT-SPI EditableText.")?;
+    let reader = proxies.text().await?;
+    let selection_count = reader
+        .inner()
+        .call::<_, _, i32>("GetNSelections", &())
+        .await?;
+    anyhow::ensure!(
+        selection_count <= 1,
+        "Target has multiple text selections; select one range before inserting text."
+    );
+    let position = if selection_count == 1 {
+        let (start, end) = reader.get_selection(0).await?;
+        anyhow::ensure!(
+            editable.delete_text(start, end).await?,
+            "Target rejected replacing selected text."
+        );
+        start
+    } else {
+        reader.caret_offset().await?
+    };
+    anyhow::ensure!(
+        position >= 0,
+        "Target has no text caret; use select_text to place it first."
+    );
+    // AT-SPI insertion positions count characters, but the length argument counts UTF-8 bytes.
+    anyhow::ensure!(
+        editable
+            .insert_text(position, text, i32::try_from(text.len())?)
+            .await?,
+        "Target rejected text insertion."
+    );
+    anyhow::ensure!(
+        reader
+            .set_caret_offset(position + text.chars().count() as i32)
+            .await?,
+        "Text was inserted, but the target rejected moving the caret."
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod text_selection_tests {
+    use super::matching_text_range;
+
+    #[test]
+    fn selects_unicode_character_offsets_and_disambiguates() {
+        assert_eq!(
+            matching_text_range("甲🙂乙 甲🙂丙", "甲🙂", None, Some("丙")).unwrap(),
+            (4, 6)
+        );
+        assert_eq!(
+            matching_text_range("one two one", "one", Some("two "), None).unwrap(),
+            (8, 11)
+        );
+        assert!(matching_text_range("one one", "one", None, None).is_err());
+        assert!(matching_text_range("aaa", "aa", None, None).is_err());
+        assert!(matching_text_range("abc", "missing", None, None).is_err());
+        assert!(matching_text_range("abc", "", None, None).is_err());
+    }
 }
 
 const MAX_TEXT_READBACK_CHARS: i32 = 4096;
@@ -962,7 +1138,8 @@ async fn text_from_proxies(
         None
     };
     let selection_count = text
-        .get_nselections()
+        .inner()
+        .call::<_, _, i32>("GetNSelections", &())
         .await
         .unwrap_or_default()
         .clamp(0, MAX_TEXT_SELECTIONS);

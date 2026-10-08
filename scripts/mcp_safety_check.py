@@ -18,6 +18,7 @@ from typing import Any
 
 
 EXPECTED_TOOLS = {
+    "select_text", "paste", "list_launchable_apps", "launch_app", "wait_for", "perform_actions", "reset_session",
     "doctor",
     "setup_accessibility",
     "setup_window_targeting",
@@ -90,6 +91,7 @@ SEMANTIC_SELECTORS = {
 OBJECT_REF_SELECTORS = SEMANTIC_SELECTORS | {"element_identifier"}
 
 READ_ONLY_TOOLS = {
+    "list_launchable_apps", "wait_for",
     "doctor",
     "list_apps",
     "get_app_state",
@@ -98,6 +100,7 @@ READ_ONLY_TOOLS = {
 }
 
 DESTRUCTIVE_MUTATING_TOOLS = {
+    "paste", "perform_actions",
     "click",
     "drag",
     "press_key",
@@ -110,6 +113,7 @@ DESTRUCTIVE_MUTATING_TOOLS = {
 NON_DESTRUCTIVE_MUTATING_TOOLS = EXPECTED_TOOLS - READ_ONLY_TOOLS - DESTRUCTIVE_MUTATING_TOOLS
 
 IDEMPOTENT_TOOLS = READ_ONLY_TOOLS | {
+    "select_text", "reset_session",
     "setup_accessibility",
     "setup_window_targeting",
     "activate_window",
@@ -118,6 +122,7 @@ IDEMPOTENT_TOOLS = READ_ONLY_TOOLS | {
 }
 
 OPEN_WORLD_TOOLS = (EXPECTED_TOOLS | {SHELL_TOOL, COMPLETION_TOOL}) - {
+    "reset_session",
     "doctor",
     "setup_accessibility",
     "setup_window_targeting",
@@ -205,7 +210,7 @@ class McpClient:
         ready, _, _ = select.select([self.process.stderr], [], [], 0)
         if not ready:
             return ""
-        return self.process.stderr.read()[-2000:]
+        return os.read(self.process.stderr.fileno(), 8192).decode(errors="replace")[-2000:]
 
 
 def package_version(repo: pathlib.Path) -> str:

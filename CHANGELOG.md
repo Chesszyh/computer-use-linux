@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Per-target accessibility diffs with stable element identities and session reset.
+- Verified text selection/caret positioning and element-targeted Unicode insertion.
+- Wayland text/HTML paste with preservation of previous clipboard formats.
+- Hyprland background window capture and targeted key chords, including Lua dispatchers.
+- Installed application discovery/launch, ordered action batches and condition-based observation.
+- Persistent JavaScript application bindings exported as `@agent-sh/computer-use-linux/cua`.
+
+### Fixed
+- Hyprland foreground activation raises floating windows before coordinate input.
+- AT-SPI text selection readback uses the protocol's `GetNSelections` method name.
+- MCP smoke tests stop reading stderr at the available bytes when a server handler fails.
+
+
 ## [0.7.12] - 2026-10-07
 
 ### Added
