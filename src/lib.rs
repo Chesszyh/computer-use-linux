@@ -1,8 +1,10 @@
 mod abs_pointer;
 mod accessibility_guard;
+mod applications;
 #[path = "atspi_tree.rs"]
 mod atspi_tree_impl;
 mod cli;
+mod clipboard;
 mod command_runner;
 mod cosmic_helper;
 #[path = "diagnostics.rs"]
@@ -11,11 +13,13 @@ mod gnome_extension;
 mod identity;
 pub mod indicator;
 mod keyboard_keymap;
+mod observations;
 mod remote_desktop;
 #[path = "screenshot.rs"]
 mod screenshot_impl;
 mod server;
 mod terminal;
+mod window_capture;
 mod windowing;
 mod windows;
 mod x11_display;
@@ -23,10 +27,11 @@ mod ydotool;
 
 pub mod atspi_tree {
     pub(crate) use crate::atspi_tree_impl::{
-        focused_element_summary_in_app, list_accessible_apps, object_ref_owner_pid, perform_action,
-        perform_named_action, probe_focused_element, set_element_value,
-        snapshot_accessibility_tree, snapshot_limits, AccessibleAppSummary, FocusProbe,
-        FocusedElementSummary, ValueSetInvocation, UNKNOWN_ROLE,
+        focused_element_summary_in_app, insert_element_text, list_accessible_apps,
+        object_ref_owner_pid, perform_action, perform_named_action, probe_focused_element,
+        select_element_text, set_element_value, snapshot_accessibility_tree, snapshot_limits,
+        AccessibleAppSummary, FocusProbe, FocusedElementSummary, SelectionType, ValueSetInvocation,
+        UNKNOWN_ROLE,
     };
     pub use crate::atspi_tree_impl::{
         snapshot_tree, AccessibilityAction, AccessibilityNode, AccessibilityText,

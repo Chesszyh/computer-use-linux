@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.12";
-export const GENERATED_TOOL_CATALOG_HASH = "666f4649084b7c1a240e6a0eacc01a55379b64a579355f50071211437e91229c";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "554322e70886f5c1e1a3ad06869c5be91c140103f71350ad635160e128c1563d";
+export const GENERATED_TOOL_CATALOG_HASH = "8e272efa50eca3dc3c5a5add7b205827ca08f6dc37e2f9b6d985fe9df087ebb0";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "304f3eef7f3073bfb2348442006c3b6c9546e5a975f66b8d8880895385d7972c";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -103,6 +103,15 @@ export const GENERATED_MCP_TOOLS =
     },
     "description": "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. Plain left activation prefers a native AT-SPI click/press/toggle action, avoiding toolkit coordinate scaling. Entry activate and slider jump actions are not substituted for pointer clicks. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics.",
     "inputSchema": {
+      "$defs": {
+        "CoordinateSpace": {
+          "enum": [
+            "desktop_crop",
+            "window_surface"
+          ],
+          "type": "string"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "app_id": {
@@ -126,6 +135,11 @@ export const GENERATED_MCP_TOOLS =
             "integer",
             "null"
           ]
+        },
+        "coordinate_space": {
+          "$ref": "#/$defs/CoordinateSpace",
+          "default": "desktop_crop",
+          "description": "Coordinate origin for relative input. Use window_surface after a background window capture."
         },
         "element_index": {
           "default": null,
@@ -295,13 +309,20 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": true
     },
-    "description": "Start an app use session if needed, then get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Screenshot results include coordinate_width, coordinate_height, scale, format, and quality when the returned image is downscaled or compressed; callers can request jpeg/quality for compression before resizing.",
+    "description": "Read a size-bounded screenshot and accessibility state for a Linux app. state_mode=diff returns changes since the same target was observed, with stable element indices. background=true captures a Hyprland window surface without activating it. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Screenshot results include coordinate_width, coordinate_height, scale, format, and quality when the returned image is downscaled or compressed; callers can request jpeg/quality for compression before resizing.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
           "enum": [
             "png",
             "jpeg"
+          ],
+          "type": "string"
+        },
+        "StateMode": {
+          "enum": [
+            "full",
+            "diff"
           ],
           "type": "string"
         }
@@ -323,6 +344,11 @@ export const GENERATED_MCP_TOOLS =
             "string",
             "null"
           ]
+        },
+        "background": {
+          "default": false,
+          "description": "Capture a Hyprland window directly without activating it, including occluded windows. Requires a window target.",
+          "type": "boolean"
         },
         "format": {
           "anyOf": [
@@ -417,6 +443,11 @@ export const GENERATED_MCP_TOOLS =
             "null"
           ]
         },
+        "state_mode": {
+          "$ref": "#/$defs/StateMode",
+          "default": "full",
+          "description": "Full tree (default), or added/changed nodes and removed indices since this target was last observed."
+        },
         "terminal_command": {
           "default": null,
           "description": "Terminal command substring. Resolves a window target and scopes the tree\nwhen possible.",
@@ -491,6 +522,28 @@ export const GENERATED_MCP_TOOLS =
   {
     "annotations": {
       "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Launch an installed application using an exact id from list_launchable_apps. Uses the desktop launcher and does not interpret shell commands. Observe list_windows afterwards to identify the new window.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "app_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "app_id"
+      ],
+      "type": "object"
+    },
+    "name": "launch_app"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": true,
       "readOnlyHint": true
@@ -501,6 +554,20 @@ export const GENERATED_MCP_TOOLS =
       "type": "object"
     },
     "name": "list_apps"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "List installed, visible applications by XDG desktop-entry id. Use the exact id with launch_app.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "list_launchable_apps"
   },
   {
     "annotations": {
@@ -619,6 +686,102 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
+    "description": "Paste plain text and optional HTML into a target window, then restore all previous Wayland clipboard formats. Uses the terminal-specific paste shortcut for terminal windows. Another application's clipboard change is preserved. Requires a data-control capable Wayland compositor.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "app_id": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "html": {
+          "default": null,
+          "description": "Optional rich-text representation; text remains the plain-text fallback.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pid": {
+          "default": null,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "terminal_command": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "terminal_cwd": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "terminal_pid": {
+          "default": null,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "text": {
+          "type": "string"
+        },
+        "title": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tty": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "window_id": {
+          "default": null,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "wm_class": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "type": "object"
+    },
+    "name": "paste"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
     "description": "Invoke an accessibility action exposed by an element selected by index, identifier, or semantic selector. Defaults to the primary action unless action is provided.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -685,6 +848,1055 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
+    "description": "Execute ordered desktop actions and stop at the first failure. Optionally return a fresh get_app_state observation at the end. Batch only deterministic actions; observe again before choosing new element targets.",
+    "inputSchema": {
+      "$defs": {
+        "ActionParams": {
+          "properties": {
+            "action": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "element_identifier": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "element_index": {
+              "default": null,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "name": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "role": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "states": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "text": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "BatchAction": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ClickParams",
+              "properties": {
+                "tool": {
+                  "const": "click",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tool"
+              ],
+              "type": "object"
+            },
+            {
+              "$ref": "#/$defs/PressKeyParams",
+              "properties": {
+                "tool": {
+                  "const": "press_key",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tool"
+              ],
+              "type": "object"
+            },
+            {
+              "$ref": "#/$defs/TypeTextParams",
+              "properties": {
+                "tool": {
+                  "const": "type_text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tool"
+              ],
+              "type": "object"
+            },
+            {
+              "$ref": "#/$defs/SetValueParams",
+              "properties": {
+                "tool": {
+                  "const": "set_value",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tool"
+              ],
+              "type": "object"
+            },
+            {
+              "$ref": "#/$defs/SelectTextParams",
+              "properties": {
+                "tool": {
+                  "const": "select_text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tool"
+              ],
+              "type": "object"
+            },
+            {
+              "$ref": "#/$defs/ActionParams",
+              "properties": {
+                "tool": {
+                  "const": "perform_action",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tool"
+              ],
+              "type": "object"
+            },
+            {
+              "$ref": "#/$defs/ScrollParams",
+              "properties": {
+                "tool": {
+                  "const": "scroll",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tool"
+              ],
+              "type": "object"
+            },
+            {
+              "$ref": "#/$defs/DragParams",
+              "properties": {
+                "tool": {
+                  "const": "drag",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tool"
+              ],
+              "type": "object"
+            },
+            {
+              "$ref": "#/$defs/PasteParams",
+              "properties": {
+                "tool": {
+                  "const": "paste",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tool"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ClickParams": {
+          "properties": {
+            "app_id": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "button": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "click_count": {
+              "default": null,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "coordinate_space": {
+              "$ref": "#/$defs/CoordinateSpace",
+              "default": "desktop_crop",
+              "description": "Coordinate origin for relative input. Use window_surface after a background window capture."
+            },
+            "element_index": {
+              "default": null,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "name": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pid": {
+              "default": null,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "relative": {
+              "default": null,
+              "description": "Interpret `x`/`y` from the clipped window screenshot crop origin, in\ncoordinate pixels before preview resizing. Divide preview pixels by its\nscale first. This is not a toolkit widget or raw GDK surface origin.\nRequires a window target; missing targets are rejected.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "role": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "states": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "text": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "window_id": {
+              "default": null,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "window_title": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "wm_class": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "x": {
+              "default": null,
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "y": {
+              "default": null,
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "CoordinateSpace": {
+          "enum": [
+            "desktop_crop",
+            "window_surface"
+          ],
+          "type": "string"
+        },
+        "DragParams": {
+          "properties": {
+            "end_x": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "end_y": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "start_x": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "start_y": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start_x",
+            "start_y",
+            "end_x",
+            "end_y"
+          ],
+          "type": "object"
+        },
+        "GetAppStateParams": {
+          "properties": {
+            "app_id": {
+              "default": null,
+              "description": "Application id. Also scopes the accessibility tree when it matches an\nAT-SPI root.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "app_name_or_bundle_identifier": {
+              "default": null,
+              "description": "App name or AT-SPI id that limits the accessibility tree. Omit only when\nyou need the whole desktop tree; unscoped results can flood context.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "background": {
+              "default": false,
+              "description": "Capture a Hyprland window directly without activating it, including occluded windows. Requires a window target.",
+              "type": "boolean"
+            },
+            "format": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ScreenshotOutputFormat"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Output image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads."
+            },
+            "include_screenshot": {
+              "default": null,
+              "description": "Include a size-bounded screenshot (default true). Set false when the\naccessibility tree is enough.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "max_bytes": {
+              "default": null,
+              "description": "Maximum returned screenshot image bytes before base64 (default 2 MiB, hard-capped).",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "max_depth": {
+              "default": null,
+              "description": "Maximum AT-SPI traversal depth (default 32, hard max 64).",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "max_height": {
+              "default": null,
+              "description": "Maximum returned screenshot height in pixels (default 1920, hard-capped).",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "max_nodes": {
+              "default": null,
+              "description": "Maximum raw AT-SPI nodes to inspect before compaction (default 1000, hard max 2000).",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "max_width": {
+              "default": null,
+              "description": "Maximum returned screenshot width in pixels (default 1920, hard-capped).",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "pid": {
+              "default": null,
+              "description": "Process id. Also scopes the accessibility tree to that process when it\nexposes AT-SPI.",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "quality": {
+              "default": null,
+              "description": "JPEG quality from 1 to 95 (default 80). Ignored for png.",
+              "maximum": 95,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "scale": {
+              "default": null,
+              "description": "Additional downscale factor from 0.0 to 1.0, applied before max dimensions.",
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "state_mode": {
+              "$ref": "#/$defs/StateMode",
+              "default": "full",
+              "description": "Full tree (default), or added/changed nodes and removed indices since this target was last observed."
+            },
+            "terminal_command": {
+              "default": null,
+              "description": "Terminal command substring. Resolves a window target and scopes the tree\nwhen possible.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "terminal_cwd": {
+              "default": null,
+              "description": "Terminal working directory. Resolves a window target and scopes the tree\nwhen possible.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "terminal_pid": {
+              "default": null,
+              "description": "Terminal emulator pid. Resolves a window target and scopes the tree when\npossible.",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "title": {
+              "default": null,
+              "description": "Window title substring. Also scopes the accessibility tree when it\nmatches an AT-SPI root.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tty": {
+              "default": null,
+              "description": "Terminal tty device (for example /dev/pts/3). Resolves a window target\nand scopes the tree when possible.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "verbose": {
+              "default": null,
+              "description": "Include the full diagnostics report (large). Default false: only the\ncompact readiness block is returned.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "window_id": {
+              "default": null,
+              "description": "Compositor window id. Also scopes the accessibility tree to that window's\napplication when possible.",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "wm_class": {
+              "default": null,
+              "description": "Window manager class. Also scopes the accessibility tree when it matches\nan AT-SPI root.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "PasteParams": {
+          "properties": {
+            "app_id": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "html": {
+              "default": null,
+              "description": "Optional rich-text representation; text remains the plain-text fallback.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pid": {
+              "default": null,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "terminal_command": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "terminal_cwd": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "terminal_pid": {
+              "default": null,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
+            "title": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tty": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "window_id": {
+              "default": null,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "wm_class": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        },
+        "PressKeyParams": {
+          "properties": {
+            "app_id": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "background": {
+              "default": false,
+              "description": "Send a key to a native Wayland window on Hyprland without activating it. XWayland is unsupported. Requires a window target.",
+              "type": "boolean"
+            },
+            "key": {
+              "type": "string"
+            },
+            "pid": {
+              "default": null,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "terminal_command": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "terminal_cwd": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "terminal_pid": {
+              "default": null,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "title": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tty": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "window_id": {
+              "default": null,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "wm_class": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "key"
+          ],
+          "type": "object"
+        },
+        "ScreenshotOutputFormat": {
+          "enum": [
+            "png",
+            "jpeg"
+          ],
+          "type": "string"
+        },
+        "ScrollParams": {
+          "properties": {
+            "app_id": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "coordinate_space": {
+              "$ref": "#/$defs/CoordinateSpace",
+              "default": "desktop_crop",
+              "description": "Coordinate origin for relative input. Use window_surface after a background window capture."
+            },
+            "direction": {
+              "type": "string"
+            },
+            "element_index": {
+              "default": null,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "pages": {
+              "default": null,
+              "format": "double",
+              "maximum": 100,
+              "minimum": -100,
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "pid": {
+              "default": null,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "relative": {
+              "default": null,
+              "description": "Interpret `x`/`y` from the clipped window screenshot crop origin, in\ncoordinate pixels before preview resizing. Divide preview pixels by its\nscale first. This is not a toolkit widget or raw GDK surface origin.\nRequires a window target; missing targets are rejected.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "window_id": {
+              "default": null,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "window_title": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "wm_class": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "x": {
+              "default": null,
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "y": {
+              "default": null,
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "direction"
+          ],
+          "type": "object"
+        },
+        "SelectTextParams": {
+          "properties": {
+            "element_identifier": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "element_index": {
+              "default": null,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "name": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "prefix": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "role": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "selection_type": {
+              "$ref": "#/$defs/SelectionType",
+              "default": "text"
+            },
+            "suffix": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        },
+        "SelectionType": {
+          "enum": [
+            "text",
+            "cursor_before",
+            "cursor_after"
+          ],
+          "type": "string"
+        },
+        "SetValueParams": {
+          "properties": {
+            "element_identifier": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "element_index": {
+              "default": null,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "name": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "role": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "states": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "text": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "value"
+          ],
+          "type": "object"
+        },
+        "StateMode": {
+          "enum": [
+            "full",
+            "diff"
+          ],
+          "type": "string"
+        },
+        "TypeTextParams": {
+          "properties": {
+            "app_id": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "element_identifier": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "element_index": {
+              "default": null,
+              "description": "Insert at this element's caret or replace its selection through AT-SPI, without changing window focus.",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "pid": {
+              "default": null,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "terminal_command": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "terminal_cwd": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "terminal_pid": {
+              "default": null,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
+            "title": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tty": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "window_id": {
+              "default": null,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "wm_class": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/BatchAction"
+          },
+          "type": "array"
+        },
+        "observe": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GetAppStateParams"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "actions"
+      ],
+      "type": "object"
+    },
+    "name": "perform_actions"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
     "description": "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -695,6 +1907,11 @@ export const GENERATED_MCP_TOOLS =
             "string",
             "null"
           ]
+        },
+        "background": {
+          "default": false,
+          "description": "Send a key to a native Wayland window on Hyprland without activating it. XWayland is unsupported. Requires a window target.",
+          "type": "boolean"
         },
         "key": {
           "type": "string"
@@ -765,6 +1982,20 @@ export const GENERATED_MCP_TOOLS =
       "type": "object"
     },
     "name": "press_key"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Discard cached observations and release this MCP session's portal connections. Existing applications, windows and clipboard contents remain available. Old element indices are invalid after reset.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "reset_session"
   },
   {
     "annotations": {
@@ -869,7 +2100,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Capture the screen and return it as a viewable, size-bounded image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped before any resize. Returns the image plus a short caption with returned dimensions, coordinate dimensions, scale, format, quality, source, and crop bounds; callers can request jpeg/quality for compression before resizing.",
+    "description": "Capture the screen and return it as a viewable, size-bounded image. background=true captures a Hyprland window surface without raising it; use coordinate_space=window_surface for relative input from that image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped before any resize. Returns the image plus a short caption with returned dimensions, coordinate dimensions, scale, format, quality, source, and crop bounds; callers can request jpeg/quality for compression before resizing.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
@@ -888,6 +2119,11 @@ export const GENERATED_MCP_TOOLS =
             "string",
             "null"
           ]
+        },
+        "background": {
+          "default": false,
+          "description": "Capture a Hyprland window directly without raising it. Cannot be combined with full_screen.",
+          "type": "boolean"
         },
         "format": {
           "anyOf": [
@@ -1007,6 +2243,15 @@ export const GENERATED_MCP_TOOLS =
     },
     "description": "Scroll an element in a direction by a number of pages. With a window target and no x/y/element_index, scrolls at the centre of the targeted window.",
     "inputSchema": {
+      "$defs": {
+        "CoordinateSpace": {
+          "enum": [
+            "desktop_crop",
+            "window_surface"
+          ],
+          "type": "string"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "app_id": {
@@ -1015,6 +2260,11 @@ export const GENERATED_MCP_TOOLS =
             "string",
             "null"
           ]
+        },
+        "coordinate_space": {
+          "$ref": "#/$defs/CoordinateSpace",
+          "default": "desktop_crop",
+          "description": "Coordinate origin for relative input. Use window_surface after a background window capture."
         },
         "direction": {
           "type": "string"
@@ -1098,6 +2348,85 @@ export const GENERATED_MCP_TOOLS =
       "type": "object"
     },
     "name": "scroll"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Select an exact text occurrence or place the caret before/after it through AT-SPI. Use prefix/suffix to disambiguate repeated text. Does not activate the window; verifies the resulting selection.",
+    "inputSchema": {
+      "$defs": {
+        "SelectionType": {
+          "enum": [
+            "text",
+            "cursor_before",
+            "cursor_after"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "element_identifier": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "element_index": {
+          "default": null,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prefix": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selection_type": {
+          "$ref": "#/$defs/SelectionType",
+          "default": "text"
+        },
+        "suffix": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "type": "object"
+    },
+    "name": "select_text"
   },
   {
     "annotations": {
@@ -1210,6 +2539,22 @@ export const GENERATED_MCP_TOOLS =
             "null"
           ]
         },
+        "element_identifier": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "element_index": {
+          "default": null,
+          "description": "Insert at this element's caret or replace its selection through AT-SPI, without changing window focus.",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "pid": {
           "default": null,
           "minimum": 0,
@@ -1279,6 +2624,259 @@ export const GENERATED_MCP_TOOLS =
       "type": "object"
     },
     "name": "type_text"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Wait for an accessibility element matching role/name/text/states, returning a full fresh state when found or at timeout. Scope with a window or app target. Polls locally without extra model calls; timeout is reported by wait_satisfied=false.",
+    "inputSchema": {
+      "$defs": {
+        "ScreenshotOutputFormat": {
+          "enum": [
+            "png",
+            "jpeg"
+          ],
+          "type": "string"
+        },
+        "StateMode": {
+          "enum": [
+            "full",
+            "diff"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "app_id": {
+          "default": null,
+          "description": "Application id. Also scopes the accessibility tree when it matches an\nAT-SPI root.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "app_name_or_bundle_identifier": {
+          "default": null,
+          "description": "App name or AT-SPI id that limits the accessibility tree. Omit only when\nyou need the whole desktop tree; unscoped results can flood context.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "background": {
+          "default": false,
+          "description": "Capture a Hyprland window directly without activating it, including occluded windows. Requires a window target.",
+          "type": "boolean"
+        },
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScreenshotOutputFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Output image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads."
+        },
+        "include_screenshot": {
+          "default": null,
+          "description": "Include a size-bounded screenshot (default true). Set false when the\naccessibility tree is enough.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "max_bytes": {
+          "default": null,
+          "description": "Maximum returned screenshot image bytes before base64 (default 2 MiB, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_depth": {
+          "default": null,
+          "description": "Maximum AT-SPI traversal depth (default 32, hard max 64).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_height": {
+          "default": null,
+          "description": "Maximum returned screenshot height in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_nodes": {
+          "default": null,
+          "description": "Maximum raw AT-SPI nodes to inspect before compaction (default 1000, hard max 2000).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_width": {
+          "default": null,
+          "description": "Maximum returned screenshot width in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pid": {
+          "default": null,
+          "description": "Process id. Also scopes the accessibility tree to that process when it\nexposes AT-SPI.",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "quality": {
+          "default": null,
+          "description": "JPEG quality from 1 to 95 (default 80). Ignored for png.",
+          "maximum": 95,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "role": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scale": {
+          "default": null,
+          "description": "Additional downscale factor from 0.0 to 1.0, applied before max dimensions.",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "state_mode": {
+          "$ref": "#/$defs/StateMode",
+          "default": "full",
+          "description": "Full tree (default), or added/changed nodes and removed indices since this target was last observed."
+        },
+        "states": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "terminal_command": {
+          "default": null,
+          "description": "Terminal command substring. Resolves a window target and scopes the tree\nwhen possible.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "terminal_cwd": {
+          "default": null,
+          "description": "Terminal working directory. Resolves a window target and scopes the tree\nwhen possible.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "terminal_pid": {
+          "default": null,
+          "description": "Terminal emulator pid. Resolves a window target and scopes the tree when\npossible.",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "text": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timeout_ms": {
+          "default": null,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "title": {
+          "default": null,
+          "description": "Window title substring. Also scopes the accessibility tree when it\nmatches an AT-SPI root.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tty": {
+          "default": null,
+          "description": "Terminal tty device (for example /dev/pts/3). Resolves a window target\nand scopes the tree when possible.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verbose": {
+          "default": null,
+          "description": "Include the full diagnostics report (large). Default false: only the\ncompact readiness block is returned.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "window_id": {
+          "default": null,
+          "description": "Compositor window id. Also scopes the accessibility tree to that window's\napplication when possible.",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "wm_class": {
+          "default": null,
+          "description": "Window manager class. Also scopes the accessibility tree when it matches\nan AT-SPI root.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "name": "wait_for"
   }
 ] as const satisfies readonly GeneratedMcpToolDefinition[];
 export const GENERATED_OPTIONAL_MCP_TOOLS =

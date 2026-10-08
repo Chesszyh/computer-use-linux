@@ -202,3 +202,9 @@ Ready output should have:
 Doctor detects screenshot routes without capturing or requesting consent. Treat unverified capture as a warning. Call `get_app_state` with `include_screenshot: true` to verify it: a successful raw capture reports `screenshot_capture_status: "verified"` and `can_capture_screenshots: true`; a failure reports `failed` and keeps the boolean false. Inspect `screenshot_error` for the full backend cause.
 
 Then test with your agent by calling the `doctor` tool or asking the agent to list desktop windows.
+
+## Source-built desktop extensions
+
+For accessibility diffs, text selection, formatted paste, Hyprland background
+capture and JavaScript application bindings, see
+[Desktop interaction](https://github.com/Chesszyh/computer-use-linux/blob/main/docs/desktop-control.md).

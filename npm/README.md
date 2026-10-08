@@ -91,3 +91,11 @@ standalone CLI wrapper retains Node.js 18 support.
 If you already built or installed the binary yourself, set
 `COMPUTER_USE_LINUX_BIN=/path/to/computer-use-linux` to make the wrapper use
 that executable instead.
+
+## Application workflows
+
+The package exports a persistent JavaScript client from
+`@agent-sh/computer-use-linux/cua` on Node.js 22.19+. The MCP tools also provide
+text selection, formatted paste, observation diffs, background Hyprland capture
+and key chords, app launching, batches, waiting and session reset.
+See [Desktop interaction](../docs/desktop-control.md) for usage.

@@ -5,6 +5,18 @@ pub(crate) async fn run_from_env() -> Result<()> {
     diagnostics::hydrate_session_bus_env();
 
     match std::env::args().nth(1).as_deref() {
+        Some("clipboard-owner") => crate::clipboard::serve_owner(),
+        Some("capture-window") => {
+            use std::io::Write;
+            let id: u64 = std::env::args()
+                .nth(2)
+                .context("capture-window requires a numeric window id")?
+                .parse()?;
+            std::io::stdout()
+                .lock()
+                .write_all(&crate::window_capture::capture_png(id)?)?;
+            Ok(())
+        }
         Some("mcp") => server::serve_mcp().await,
         Some("guard-accessibility") => crate::accessibility_guard::run().await,
         Some("doctor") => {

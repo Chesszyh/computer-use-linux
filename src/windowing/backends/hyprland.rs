@@ -218,8 +218,50 @@ fn windows_from_hyprland_clients(clients: Vec<HyprlandClient>) -> Result<Vec<Win
     Ok(windows)
 }
 
+pub async fn send_shortcut(window_id: u64, modifiers: &str, key: &str) -> Result<()> {
+    let address = format!("address:0x{window_id:x}");
+    let mods = modifiers.to_ascii_uppercase();
+    let lua =
+        format!("hl.dsp.send_shortcut({{ window = {address:?}, mods = {mods:?}, key = {key:?} }})");
+    let output = hyprctl_output_async(&["dispatch", &lua]).await?;
+    if dispatch_succeeded(&output) {
+        return Ok(());
+    }
+    let args = format!("{mods},{key},{address}");
+    let legacy = hyprctl_output_async(&["dispatch", "sendshortcut", &args]).await?;
+    anyhow::ensure!(
+        dispatch_succeeded(&legacy),
+        "Hyprland rejected the background shortcut. Lua: {}; legacy: {}",
+        command_detail(&output),
+        command_detail(&legacy)
+    );
+    Ok(())
+}
+
 pub async fn activate_window(window_id: u64) -> Result<()> {
     let address = format!("address:0x{window_id:x}");
+    let clients = hyprctl_output_async(&["clients", "-j"]).await?;
+    let clients: Vec<serde_json::Value> = serde_json::from_slice(&clients.stdout)?;
+    let raw_address = format!("0x{window_id:x}");
+    if clients
+        .iter()
+        .any(|client| client["address"] == raw_address && client["floating"] == true)
+    {
+        // Keyboard focus alone leaves a floating window underneath other floating windows.
+        let lua = format!("hl.dsp.window.alter_zorder({{ window = {address:?}, mode = \"top\" }})");
+        let raised = hyprctl_output_async(&["dispatch", &lua]).await?;
+        if !dispatch_succeeded(&raised) {
+            let legacy =
+                hyprctl_output_async(&["dispatch", "alterzorder", &format!("top,{address}")])
+                    .await?;
+            anyhow::ensure!(
+                dispatch_succeeded(&legacy),
+                "Could not raise floating window: {}; {}",
+                command_detail(&raised),
+                command_detail(&legacy)
+            );
+        }
+    }
     let lua_dispatch = lua_focus_dispatch(&address);
     let lua_output = hyprctl_output_async(&["dispatch", &lua_dispatch])
         .await

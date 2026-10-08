@@ -43,11 +43,16 @@
     "pi/extension/index.ts",
     "pi/extension/generated-tools.ts",
     "pi/extension/mcp-client.bundle.cjs",
-    "pi/extension/THIRD_PARTY_NOTICES.txt"
+    "pi/extension/THIRD_PARTY_NOTICES.txt",
+    "docs/desktop-control.md"
   ],
   "pi": {
-    "extensions": ["./pi/extension/index.ts"],
-    "skills": ["./skills/computer-use-linux/SKILL.md"]
+    "extensions": [
+      "./pi/extension/index.ts"
+    ],
+    "skills": [
+      "./skills/computer-use-linux/SKILL.md"
+    ]
   },
   "scripts": {
     "build:pi": "npm run build --prefix pi",
@@ -76,5 +81,8 @@
     "typebox": {
       "optional": true
     }
+  },
+  "exports": {
+    "./cua": "./pi/extension/mcp-client.bundle.cjs"
   }
 }

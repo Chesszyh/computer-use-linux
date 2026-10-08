@@ -4,8 +4,10 @@ use crate::atspi_tree::{
     set_element_value, snapshot_accessibility_tree, AccessibilityAction, AccessibilityNode,
     AccessibleAppSummary, Bounds, FocusProbe, FocusedElementSummary, ValueSetInvocation,
 };
+use crate::atspi_tree::{insert_element_text, select_element_text, SelectionType};
 use crate::diagnostics::{doctor_report, setup_accessibility_report, DoctorReport, SetupReport};
 use crate::gnome_extension::{setup_window_targeting_report, WindowTargetingSetupReport};
+use crate::observations::{Observations, StateMode, TreeChanges};
 use crate::remote_desktop::{
     click as portal_click, drag as portal_drag, keysyms_for_text, press_key_chord,
     press_keycode_chord, scroll as portal_scroll, start_portal_keyboard_session,
@@ -77,6 +79,7 @@ struct CachedAccessibilitySnapshot {
 #[derive(Clone, Default)]
 pub struct ComputerUseLinux {
     last_snapshot: Arc<Mutex<CachedAccessibilitySnapshot>>,
+    observations: Arc<Mutex<Observations>>,
     portal_pointer_session: Arc<Mutex<Option<PortalPointerSession>>>,
     portal_keyboard_session: Arc<Mutex<Option<PortalKeyboardSession>>>,
     /// Lazily-created uinput absolute pointer (preferred coordinate backend).
@@ -89,6 +92,29 @@ pub struct ComputerUseLinux {
     desktop_size: Arc<Mutex<Option<(u32, u32)>>>,
     /// On-screen activity overlay (opt-out via `COMPUTER_USE_LINUX_INDICATOR=0`).
     indicator: Arc<crate::indicator::Indicator>,
+}
+
+struct ActionMarker(Arc<Mutex<Observations>>);
+impl Drop for ActionMarker {
+    fn drop(&mut self) {
+        if let Ok(mut observations) = self.0.lock() {
+            observations.action_completed();
+        }
+    }
+}
+
+fn simple_action_result(
+    action: &str,
+    result: std::result::Result<(), String>,
+    success: &str,
+) -> ActionOutput {
+    ActionOutput {
+        ok: result.is_ok(),
+        implemented: true,
+        action: action.into(),
+        message: result.err().unwrap_or_else(|| success.into()),
+        received: None,
+    }
 }
 
 fn sanitize_unsigned_integer_formats(value: &mut serde_json::Value) {
@@ -118,6 +144,10 @@ fn sanitize_unsigned_integer_formats(value: &mut serde_json::Value) {
 }
 
 impl ComputerUseLinux {
+    fn action_marker(&self) -> ActionMarker {
+        ActionMarker(Arc::clone(&self.observations))
+    }
+
     fn mcp_tool_router(&self) -> rmcp::handler::server::router::tool::ToolRouter<Self> {
         self.router_with_completion(env::var(COMPLETION_ENABLE_ENV).as_deref() == Ok("1"))
     }
@@ -222,6 +252,186 @@ impl ComputerUseLinux {
     }
 
     #[tool(
+        name = "perform_actions",
+        description = "Execute ordered desktop actions and stop at the first failure. Optionally return a fresh get_app_state observation at the end. Batch only deterministic actions; observe again before choosing new element targets.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn perform_actions(
+        &self,
+        Parameters(params): Parameters<BatchParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if params.actions.is_empty() || params.actions.len() > 50 {
+            return Err(ErrorData::invalid_params(
+                "Supply between 1 and 50 actions.",
+                None,
+            ));
+        }
+        let mut results = Vec::new();
+        for action in params.actions {
+            let Json(result) = match action {
+                BatchAction::Click(p) => self.click(Parameters(p)).await,
+                BatchAction::PressKey(p) => self.press_key(Parameters(p)).await,
+                BatchAction::TypeText(p) => self.type_text(Parameters(p)).await,
+                BatchAction::SetValue(p) => self.set_value(Parameters(p)).await,
+                BatchAction::SelectText(p) => self.select_text(Parameters(p)).await,
+                BatchAction::PerformAction(p) => self.perform_action(Parameters(p)).await,
+                BatchAction::Scroll(p) => self.scroll(Parameters(p)).await,
+                BatchAction::Drag(p) => self.drag(Parameters(p)).await,
+                BatchAction::Paste(p) => self.paste(Parameters(p)).await,
+            };
+            let ok = result.ok;
+            results.push(result);
+            if !ok {
+                break;
+            }
+        }
+        let mut result = if let Some(observe) = params.observe {
+            self.get_app_state(Parameters(observe)).await?
+        } else {
+            CallToolResult::success(vec![])
+        };
+        let summary = serde_json::json!({ "ok": results.iter().all(|r| r.ok), "completed_actions": results.iter().filter(|result| result.ok).count(), "attempted_actions": results.len(), "actions": results });
+        result
+            .content
+            .insert(0, ContentBlock::text(summary.to_string()));
+        if let Some(state) = result.structured_content.take() {
+            result.structured_content =
+                Some(serde_json::json!({ "batch": summary, "observation": state }));
+        } else {
+            result.structured_content = Some(summary);
+        }
+        Ok(result)
+    }
+
+    #[tool(
+        name = "wait_for",
+        description = "Wait for an accessibility element matching role/name/text/states, returning a full fresh state when found or at timeout. Scope with a window or app target. Polls locally without extra model calls; timeout is reported by wait_satisfied=false.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn wait_for(
+        &self,
+        Parameters(mut params): Parameters<WaitForParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let selector = ElementSelector {
+            role: params.role.as_deref(),
+            name: params.name.as_deref(),
+            text: params.text.as_deref(),
+            states: &params.states,
+        };
+        if selector.is_empty() {
+            return Err(ErrorData::invalid_params(
+                "wait_for requires role, name, text, or states.",
+                None,
+            ));
+        }
+        let requested_screenshot = params.target.include_screenshot.unwrap_or(false);
+        params.target.include_screenshot = Some(false);
+        params.target.state_mode = StateMode::Full;
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_millis(params.timeout_ms.unwrap_or(5000).min(30000));
+        loop {
+            let mut result = self
+                .get_app_state(Parameters(params.target.clone()))
+                .await?;
+            let matched = self
+                .last_snapshot
+                .lock()
+                .unwrap()
+                .nodes
+                .iter()
+                .any(|node| node_matches_selector(node, &selector));
+            if matched || tokio::time::Instant::now() >= deadline {
+                if requested_screenshot {
+                    params.target.include_screenshot = Some(true);
+                    result = self.get_app_state(Parameters(params.target)).await?;
+                }
+                if let Some(state) = result.structured_content.as_mut() {
+                    state["wait_satisfied"] = matched.into();
+                }
+                result.content.push(ContentBlock::text(
+                    serde_json::json!({"wait_satisfied":matched}).to_string(),
+                ));
+                return Ok(result);
+            }
+            sleep(Duration::from_millis(150)).await;
+        }
+    }
+
+    #[tool(
+        name = "list_launchable_apps",
+        description = "List installed, visible applications by XDG desktop-entry id. Use the exact id with launch_app.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn list_launchable_apps(&self) -> Json<LaunchableAppsOutput> {
+        Json(LaunchableAppsOutput {
+            apps: crate::applications::list_launchable_apps(),
+        })
+    }
+
+    #[tool(
+        name = "launch_app",
+        description = "Launch an installed application using an exact id from list_launchable_apps. Uses the desktop launcher and does not interpret shell commands. Observe list_windows afterwards to identify the new window.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn launch_app(
+        &self,
+        Parameters(params): Parameters<LaunchAppParams>,
+    ) -> Json<ActionOutput> {
+        let _settle = self.action_marker();
+        Json(simple_action_result(
+            "launch_app",
+            crate::applications::launch(&params.app_id)
+                .await
+                .map_err(|e| format!("{e:#}")),
+            "Application launch requested. Use list_windows to find its window.",
+        ))
+    }
+
+    #[tool(
+        name = "reset_session",
+        description = "Discard cached observations and release this MCP session's portal connections. Existing applications, windows and clipboard contents remain available. Old element indices are invalid after reset.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn reset_session(&self) -> Json<ActionOutput> {
+        let _input = self.input_operation_lock.lock().await;
+        self.clear_cached_nodes();
+        self.observations.lock().unwrap().reset();
+        self.portal_pointer_session.lock().unwrap().take();
+        self.portal_keyboard_session.lock().unwrap().take();
+        self.abs_pointer.lock().unwrap().take();
+        Json(simple_action_result(
+            "reset_session",
+            Ok(()),
+            "Observation and input sessions released.",
+        ))
+    }
+
+    #[tool(
         name = "list_apps",
         description = "List running Linux desktop app candidates visible to the Computer Use backend.",
         annotations(
@@ -256,6 +466,8 @@ impl ComputerUseLinux {
         )
     )]
     async fn list_windows(&self) -> Json<ListWindowsOutput> {
+        let settle = self.observations.lock().unwrap().remaining_settle_time();
+        sleep(settle).await;
         Json(window_list_output().await)
     }
 
@@ -270,6 +482,8 @@ impl ComputerUseLinux {
         )
     )]
     async fn focused_window(&self) -> Json<FocusedWindowOutput> {
+        let settle = self.observations.lock().unwrap().remaining_settle_time();
+        sleep(settle).await;
         match focused_window().await {
             Ok(window) => {
                 let backend = window_backend(window.as_ref().into_iter());
@@ -345,7 +559,7 @@ impl ComputerUseLinux {
         name = "get_app_state",
         output_schema = rmcp::handler::server::tool::schema_for_output::<GetAppStateOutput>()
             .expect("get_app_state output schema"),
-        description = "Start an app use session if needed, then get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Screenshot results include coordinate_width, coordinate_height, scale, format, and quality when the returned image is downscaled or compressed; callers can request jpeg/quality for compression before resizing.",
+        description = "Read a size-bounded screenshot and accessibility state for a Linux app. state_mode=diff returns changes since the same target was observed, with stable element indices. background=true captures a Hyprland window surface without activating it. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Screenshot results include coordinate_width, coordinate_height, scale, format, and quality when the returned image is downscaled or compressed; callers can request jpeg/quality for compression before resizing.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -366,6 +580,8 @@ impl ComputerUseLinux {
     }
 
     async fn app_state(&self, params: GetAppStateParams) -> Result<CallToolResult, ErrorData> {
+        let settle = self.observations.lock().unwrap().remaining_settle_time();
+        sleep(settle).await;
         let verbose = params.verbose.unwrap_or(false);
         let mut diagnostics = tokio::task::spawn_blocking(doctor_report)
             .await
@@ -391,6 +607,17 @@ impl ComputerUseLinux {
         let (screenshot, screenshot_error) = if include_screenshot {
             let result: Result<ScreenshotCapture> = async {
                 let _pipeline = crate::screenshot_impl::screenshot_pipeline_permit().await?;
+                if params.background {
+                    let window = window_context.as_ref().ok_or_else(|| anyhow::anyhow!("Background screenshot requires a resolved window target."))?;
+                    anyhow::ensure!(window.backend == "hyprland", "Background window capture is supported on Hyprland; use a foreground screenshot on this desktop.");
+                    let raw = crate::window_capture::capture_window(window.window_id).await;
+                    diagnostics.readiness.record_screenshot_result(raw.is_ok());
+                    let raw = raw?;
+                    let window = window.clone();
+                    return crate::screenshot_impl::run_image_task(move || {
+                        prepare_screenshot_payload(normalize_window_capture(raw, &window)?, screenshot_options)
+                    }).await;
+                }
                 let raw = {
                     let _hold = self.indicator.hold_for_capture().await?;
                     capture_screenshot_raw().await
@@ -455,17 +682,24 @@ impl ComputerUseLinux {
                     ),
                 )
             };
-        if accessibility_error.is_none() {
-            // Record a pid only when the tree's roots were matched by it. A pid
-            // with no AT-SPI root falls back to every app, or to an app-name
-            // match that can be another app entirely; recording the pid then
-            // would let that app's index pass the target check instead of
-            // taking the per-node owner lookup.
-            self.commit_snapshot(&accessibility_tree, tree_root_pid)
-                .await;
-        } else {
-            self.commit_snapshot(&[], None).await;
-        }
+        let scope = serde_json::to_string(&(
+            window_context.as_ref().map(|window| window.window_id),
+            &params.app_name_or_bundle_identifier,
+            &app_filter,
+            params.pid,
+            max_nodes,
+            max_depth,
+        ))
+        .unwrap();
+        let (accessibility_tree, returned_tree, tree_changes) = self
+            .commit_observation(
+                scope,
+                accessibility_tree,
+                params.state_mode,
+                accessibility_tree_truncated || accessibility_error.is_some(),
+                tree_root_pid,
+            )
+            .await;
         let mut message = if let Some(error) = &accessibility_error {
             format!("MCP registration is working, but AT-SPI tree extraction failed: {error}")
         } else if let Some(capture) = &screenshot {
@@ -529,7 +763,8 @@ impl ComputerUseLinux {
             backend: "linux-atspi".to_string(),
             screenshot: screenshot.as_ref().map(ScreenshotSummary::from),
             screenshot_error,
-            accessibility_tree,
+            accessibility_tree: returned_tree,
+            tree_changes,
             accessibility_tree_raw_count,
             tree_scoped,
             accessibility_tree_truncated,
@@ -543,7 +778,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "screenshot",
-        description = "Capture the screen and return it as a viewable, size-bounded image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped before any resize. Returns the image plus a short caption with returned dimensions, coordinate dimensions, scale, format, quality, source, and crop bounds; callers can request jpeg/quality for compression before resizing.",
+        description = "Capture the screen and return it as a viewable, size-bounded image. background=true captures a Hyprland window surface without raising it; use coordinate_space=window_surface for relative input from that image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped before any resize. Returns the image plus a short caption with returned dimensions, coordinate dimensions, scale, format, quality, source, and crop bounds; callers can request jpeg/quality for compression before resizing.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -561,9 +796,15 @@ impl ComputerUseLinux {
     }
 
     async fn capture_screenshot(&self, params: ScreenshotParams) -> Result<CallToolResult> {
+        let settle = self.observations.lock().unwrap().remaining_settle_time();
+        sleep(settle).await;
         let _pipeline = crate::screenshot_impl::screenshot_pipeline_permit().await?;
         let target = params.window_target();
         let target_window = match target.as_ref() {
+            Some(target) if params.background => {
+                let windows = list_windows().await?;
+                Some(resolve_window_target(&windows, target)?.clone())
+            }
             Some(target) => Some(
                 self.resolve_screenshot_window(target, params.raise_window.unwrap_or(true))
                     .await
@@ -571,6 +812,31 @@ impl ComputerUseLinux {
             ),
             None => None,
         };
+        if params.background {
+            let window = target_window
+                .as_ref()
+                .context("Background screenshot requires a window target.")?;
+            anyhow::ensure!(
+                window.backend == "hyprland" && params.full_screen != Some(true),
+                "Background capture requires a Hyprland window and full_screen=false."
+            );
+            let raw = crate::window_capture::capture_window(window.window_id).await?;
+            let window = window.clone();
+            let options = params.screenshot_options();
+            let capture = crate::screenshot_impl::run_image_task(move || {
+                prepare_screenshot_payload(normalize_window_capture(raw, &window)?, options)
+            })
+            .await?;
+            return Ok(CallToolResult::success(vec![
+                ContentBlock::image(
+                    data_url_payload(&capture.data_url),
+                    capture.mime_type.clone(),
+                ),
+                ContentBlock::text(
+                    serde_json::to_string(&ScreenshotSummary::from(&capture)).unwrap(),
+                ),
+            ]));
+        }
         let crop_window = (!params.full_screen.unwrap_or(false))
             .then_some(target_window.as_ref())
             .flatten();
@@ -706,6 +972,7 @@ impl ComputerUseLinux {
         )
     )]
     async fn click(&self, Parameters(mut params): Parameters<ClickParams>) -> Json<ActionOutput> {
+        let _settle = self.action_marker();
         let received = Some(serde_json::json!(params.clone()));
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let mut portal_target_point = None;
@@ -762,10 +1029,13 @@ impl ComputerUseLinux {
                         });
                     }
                 };
-                if let Err(message) = apply_window_relative_click_coordinates(
-                    &mut params,
-                    coordinate_map.capture_rect,
-                ) {
+                let relative_rect = match params.coordinate_space {
+                    CoordinateSpace::DesktopCrop => coordinate_map.capture_rect,
+                    CoordinateSpace::WindowSurface => coordinate_map.full_capture_rect,
+                };
+                if let Err(message) =
+                    apply_window_relative_click_coordinates(&mut params, relative_rect)
+                {
                     return Json(ActionOutput {
                         ok: false,
                         implemented: true,
@@ -1049,9 +1319,122 @@ impl ComputerUseLinux {
         &self,
         Parameters(params): Parameters<ActionParams>,
     ) -> Json<ActionOutput> {
+        let _settle = self.action_marker();
         let requested_action = requested_or_primary_action(params.action.as_deref());
         self.perform_element_action(&params, Some(requested_action))
             .await
+    }
+
+    #[tool(
+        name = "paste",
+        description = "Paste plain text and optional HTML into a target window, then restore all previous Wayland clipboard formats. Uses the terminal-specific paste shortcut for terminal windows. Another application's clipboard change is preserved. Requires a data-control capable Wayland compositor.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn paste(&self, Parameters(params): Parameters<PasteParams>) -> Json<ActionOutput> {
+        let _settle = self.action_marker();
+        let server = self.clone();
+        let task = tokio::spawn(async move {
+            let _input = server.input_operation_lock.lock().await;
+            let target = params.target.into_target();
+            let focus = server
+                .focus_target_for_input(&target)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            let shortcut = kde_clipboard_paste_shortcut(&target, focus.as_ref()).await;
+            let clipboard =
+                crate::clipboard::PasteClipboard::prepare(&params.text, params.html.as_deref())
+                    .await?;
+            let key = match shortcut {
+                KdeClipboardPasteShortcut::Standard => "Ctrl+V",
+                KdeClipboardPasteShortcut::CtrlShiftV => "Ctrl+Shift+V",
+                KdeClipboardPasteShortcut::ShiftInsert => "Shift+Insert",
+            };
+            let action = async {
+                let (modifiers, keycode) = key_chord(key).unwrap();
+                let portal = if server.should_prefer_portal_keyboard_for_chords().await {
+                    server.ensure_portal_keyboard_session().await?
+                } else {
+                    None
+                };
+                if let Some(session) = portal {
+                    press_keycode_chord(
+                        &session,
+                        &modifiers.into_iter().map(i32::from).collect::<Vec<_>>(),
+                        i32::from(keycode),
+                    )
+                    .await?;
+                } else {
+                    let events = key_sequence(key)
+                        .ok_or_else(|| anyhow::anyhow!("Unsupported paste shortcut."))?;
+                    run_ydotool(&ydotool_key_args(events, true))
+                        .await
+                        .map_err(anyhow::Error::msg)?;
+                }
+                sleep(kde_clipboard_restore_delay(&params.text)).await;
+                Ok::<(), anyhow::Error>(())
+            }
+            .await;
+            let restore = clipboard.restore().await;
+            action?;
+            restore?;
+            Ok::<(), anyhow::Error>(())
+        });
+        let result = task
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| format!("{e:#}")));
+        Json(simple_action_result("paste", result, "Paste shortcut delivered; previous clipboard restored unless another application replaced it. Verify the target's content."))
+    }
+
+    #[tool(
+        name = "select_text",
+        description = "Select an exact text occurrence or place the caret before/after it through AT-SPI. Use prefix/suffix to disambiguate repeated text. Does not activate the window; verifies the resulting selection.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn select_text(
+        &self,
+        Parameters(params): Parameters<SelectTextParams>,
+    ) -> Json<ActionOutput> {
+        let _settle = self.action_marker();
+        let _input = self.input_operation_lock.lock().await;
+        let result = match self.resolve_object_ref(
+            params.element_index,
+            params.element_identifier.as_deref(),
+            &ElementSelector {
+                role: params.role.as_deref(),
+                name: params.name.as_deref(),
+                text: None,
+                states: &[],
+            },
+            ElementResolvePurpose::SetValue,
+        ) {
+            Ok(object_ref) => select_element_text(
+                &object_ref,
+                &params.text,
+                params.prefix.as_deref(),
+                params.suffix.as_deref(),
+                params.selection_type,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("{e:#}")),
+            Err(error) => Err(error),
+        };
+        Json(simple_action_result(
+            "select_text",
+            result,
+            "Text selection verified through AT-SPI.",
+        ))
     }
 
     #[tool(
@@ -1069,6 +1452,7 @@ impl ComputerUseLinux {
         Parameters(params): Parameters<SetValueParams>,
     ) -> Json<ActionOutput> {
         let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        let _settle = self.action_marker();
         let received = Some(serde_json::json!(params.clone()));
         let object_ref = match self.resolve_object_ref(
             params.element_index,
@@ -1125,6 +1509,7 @@ impl ComputerUseLinux {
         )
     )]
     async fn scroll(&self, Parameters(mut params): Parameters<ScrollParams>) -> Json<ActionOutput> {
+        let _settle = self.action_marker();
         let received = Some(serde_json::json!(params.clone()));
         let units = match scroll_units(params.pages) {
             Ok(units) => units,
@@ -1192,10 +1577,13 @@ impl ComputerUseLinux {
                         });
                     }
                 };
-                if let Err(message) = apply_window_relative_scroll_coordinates(
-                    &mut params,
-                    coordinate_map.capture_rect,
-                ) {
+                let relative_rect = match params.coordinate_space {
+                    CoordinateSpace::DesktopCrop => coordinate_map.capture_rect,
+                    CoordinateSpace::WindowSurface => coordinate_map.full_capture_rect,
+                };
+                if let Err(message) =
+                    apply_window_relative_scroll_coordinates(&mut params, relative_rect)
+                {
                     return Json(ActionOutput {
                         ok: false,
                         implemented: true,
@@ -1477,6 +1865,7 @@ impl ComputerUseLinux {
         )
     )]
     async fn drag(&self, Parameters(params): Parameters<DragParams>) -> Json<ActionOutput> {
+        let _settle = self.action_marker();
         let received = Some(serde_json::json!(params));
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let space = self.indicator_space();
@@ -1604,8 +1993,42 @@ impl ComputerUseLinux {
         &self,
         Parameters(params): Parameters<PressKeyParams>,
     ) -> Json<ActionOutput> {
+        let _settle = self.action_marker();
         let received = Some(serde_json::json!(params.clone()));
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        if params.background {
+            let result = async {
+                let target = params.window_target();
+                anyhow::ensure!(
+                    target.has_target(),
+                    "Background keys require a window target."
+                );
+                let windows = list_windows().await?;
+                let window = resolve_window_target(&windows, &target)?;
+                anyhow::ensure!(
+                    window.backend == "hyprland",
+                    "Background keys require Hyprland."
+                );
+                let spec = xdotool_key_spec(&params.key)
+                    .ok_or_else(|| anyhow::anyhow!("Unsupported key chord."))?;
+                anyhow::ensure!(window.client_type.as_deref() != Some("x11"), "Background keys are unsupported for X11/XWayland windows. Use element-targeted AT-SPI actions or foreground press_key instead.");
+                let mut parts: Vec<_> = spec.split('+').collect();
+                let key = parts.pop().unwrap();
+                crate::windowing::backends::hyprland::send_shortcut(
+                    window.window_id,
+                    &parts.join(" "),
+                    key,
+                )
+                .await
+            }
+            .await
+            .map_err(|e| format!("{e:#}"));
+            return Json(simple_action_result(
+                "press_key",
+                result,
+                "Key sent to the target window without activating it. Verify the application response.",
+            ));
+        }
         let focus = match self.focus_target_for_input(&params.window_target()).await {
             Ok(focus) => focus,
             Err(message) => {
@@ -1760,8 +2183,27 @@ impl ComputerUseLinux {
         &self,
         Parameters(params): Parameters<TypeTextParams>,
     ) -> Json<ActionOutput> {
+        let _settle = self.action_marker();
         let received = Some(serde_json::json!(params.clone()));
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        if params.element_index.is_some() || params.element_identifier.is_some() {
+            let result = match self.resolve_object_ref(
+                params.element_index,
+                params.element_identifier.as_deref(),
+                &ElementSelector::default(),
+                ElementResolvePurpose::SetValue,
+            ) {
+                Ok(object_ref) => insert_element_text(&object_ref, &params.text)
+                    .await
+                    .map_err(|e| format!("{e:#}")),
+                Err(error) => Err(error),
+            };
+            return Json(simple_action_result(
+                "type_text",
+                result,
+                "Text inserted through AT-SPI without activating the window.",
+            ));
+        }
         let window_target = params.window_target();
         let focus = match self.focus_target_for_input(&window_target).await {
             Ok(focus) => focus,
@@ -2009,7 +2451,7 @@ impl ComputerUseLinux {
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
     version = "0.7.12",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send literal type_text through KDE clipboard integration on Plasma Wayland, wtype on compatible Wayland compositors, or portal keysyms on other Wayland sessions. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus. Treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, or read budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 2000 and 64), not by lowering max_nodes. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
+    instructions = "Use state_mode=diff for target-specific accessibility changes. select_text selects text or positions a caret; type_text with an element target inserts without activating its window. paste offers text/HTML and restores the Wayland clipboard. Hyprland background screenshots and press_key use background=true; coordinate mouse actions still use the desktop pointer. Use coordinate_space=window_surface with relative click/scroll after a background capture. wait_for checks a specific UI condition; perform_actions batches deterministic steps and can return a final observation. reset_session releases cached state and input sessions. Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send literal type_text through KDE clipboard integration on Plasma Wayland, wtype on compatible Wayland compositors, or portal keysyms on other Wayland sessions. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus. Treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, or read budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 2000 and 64), not by lowering max_nodes. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
 )]
 impl ServerHandler for ComputerUseLinux {}
 
@@ -2448,6 +2890,12 @@ struct AppCandidate {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 struct GetAppStateParams {
+    /// Capture a Hyprland window directly without activating it, including occluded windows. Requires a window target.
+    #[serde(default)]
+    background: bool,
+    /// Full tree (default), or added/changed nodes and removed indices since this target was last observed.
+    #[serde(default)]
+    state_mode: StateMode,
     /// App name or AT-SPI id that limits the accessibility tree. Omit only when
     /// you need the whole desktop tree; unscoped results can flood context.
     #[serde(default)]
@@ -2552,6 +3000,9 @@ impl GetAppStateParams {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct ScreenshotParams {
+    /// Capture a Hyprland window directly without raising it. Cannot be combined with full_screen.
+    #[serde(default)]
+    background: bool,
     #[serde(default)]
     window_id: Option<u64>,
     #[serde(default)]
@@ -2629,6 +3080,7 @@ impl ScreenshotParams {
 /// separate `image` content block (issue #145), not inside this JSON.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 struct ScreenshotSummary {
+    coordinate_space: String,
     mime_type: String,
     source: String,
     /// Width of the returned image payload.
@@ -2652,6 +3104,12 @@ struct ScreenshotSummary {
 impl From<&ScreenshotCapture> for ScreenshotSummary {
     fn from(capture: &ScreenshotCapture) -> Self {
         Self {
+            coordinate_space: if capture.source == "hyprland-toplevel-export" {
+                "window_surface"
+            } else {
+                "desktop_crop"
+            }
+            .into(),
             mime_type: capture.mime_type.clone(),
             source: capture.source.clone(),
             width: capture.width,
@@ -2695,6 +3153,7 @@ fn app_state_result(
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 struct GetAppStateOutput {
+    tree_changes: TreeChanges,
     app_name_or_bundle_identifier: Option<String>,
     window_context: Option<WindowInfo>,
     window_error: Option<String>,
@@ -2722,8 +3181,19 @@ struct GetAppStateOutput {
     message: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum CoordinateSpace {
+    #[default]
+    DesktopCrop,
+    WindowSurface,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct ClickParams {
+    /// Coordinate origin for relative input. Use window_surface after a background window capture.
+    #[serde(default)]
+    coordinate_space: CoordinateSpace,
     #[serde(default)]
     element_index: Option<u32>,
     #[serde(default)]
@@ -2826,6 +3296,82 @@ impl ActionParams {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(tag = "tool", rename_all = "snake_case")]
+enum BatchAction {
+    Click(ClickParams),
+    PressKey(PressKeyParams),
+    TypeText(TypeTextParams),
+    SetValue(SetValueParams),
+    SelectText(SelectTextParams),
+    PerformAction(ActionParams),
+    Scroll(ScrollParams),
+    Drag(DragParams),
+    Paste(PasteParams),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct BatchParams {
+    actions: Vec<BatchAction>,
+    #[serde(default)]
+    observe: Option<GetAppStateParams>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct WaitForParams {
+    #[serde(flatten)]
+    target: GetAppStateParams,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    states: Vec<String>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+struct LaunchableAppsOutput {
+    apps: Vec<crate::applications::LaunchableApp>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct LaunchAppParams {
+    app_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct PasteParams {
+    text: String,
+    /// Optional rich-text representation; text remains the plain-text fallback.
+    #[serde(default)]
+    html: Option<String>,
+    #[serde(flatten)]
+    target: ActivateWindowParams,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct SelectTextParams {
+    #[serde(default)]
+    element_index: Option<u32>,
+    #[serde(default)]
+    element_identifier: Option<String>,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    text: String,
+    #[serde(default)]
+    prefix: Option<String>,
+    #[serde(default)]
+    suffix: Option<String>,
+    #[serde(default)]
+    selection_type: SelectionType,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct SetValueParams {
     #[serde(default)]
@@ -2856,6 +3402,9 @@ impl SetValueParams {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 struct ScrollParams {
+    /// Coordinate origin for relative input. Use window_surface after a background window capture.
+    #[serde(default)]
+    coordinate_space: CoordinateSpace,
     #[serde(default)]
     element_index: Option<u32>,
     #[serde(default)]
@@ -2932,6 +3481,9 @@ struct DragParams {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 struct PressKeyParams {
     key: String,
+    /// Send a key to a native Wayland window on Hyprland without activating it. XWayland is unsupported. Requires a window target.
+    #[serde(default)]
+    background: bool,
     #[serde(default)]
     window_id: Option<u64>,
     #[serde(default)]
@@ -2955,6 +3507,11 @@ struct PressKeyParams {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 struct TypeTextParams {
     text: String,
+    /// Insert at this element's caret or replace its selection through AT-SPI, without changing window focus.
+    #[serde(default)]
+    element_index: Option<u32>,
+    #[serde(default)]
+    element_identifier: Option<String>,
     #[serde(default)]
     window_id: Option<u64>,
     #[serde(default)]
@@ -3768,12 +4325,23 @@ impl ComputerUseLinux {
         self.cache_snapshot(nodes, None);
     }
 
-    /// Readers may perform slow AT-SPI owner checks before resolving a click
-    /// or scroll again. Keep the snapshot stable for the whole input operation;
-    /// otherwise a checked index could resolve to a different app's node.
-    async fn commit_snapshot(&self, nodes: &[AccessibilityNode], target_pid: Option<u32>) {
+    async fn commit_observation(
+        &self,
+        scope: String,
+        nodes: Vec<AccessibilityNode>,
+        mode: StateMode,
+        incomplete: bool,
+        root_pid: Option<u32>,
+    ) -> (Vec<AccessibilityNode>, Vec<AccessibilityNode>, TreeChanges) {
         let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
-        self.cache_snapshot(nodes, target_pid);
+        let result = self
+            .observations
+            .lock()
+            .unwrap()
+            .update(scope, nodes, mode, incomplete);
+        // The pid is trustworthy only when AT-SPI matched the snapshot roots.
+        self.cache_snapshot(&result.0, root_pid);
+        result
     }
 
     fn cache_snapshot(&self, nodes: &[AccessibilityNode], target_pid: Option<u32>) {
@@ -3785,7 +4353,6 @@ impl ComputerUseLinux {
         }
     }
 
-    #[cfg(test)]
     fn clear_cached_nodes(&self) {
         self.cache_snapshot(&[], None);
     }
@@ -3803,11 +4370,7 @@ impl ComputerUseLinux {
         let Some(target_pid) = target_pid else {
             return Ok(());
         };
-        let snapshot_pid = self
-            .last_snapshot
-            .lock()
-            .ok()
-            .and_then(|snapshot| snapshot.pid);
+        let snapshot_pid = self.snapshot_pid_for_node(node);
         let owner_pid = match snapshot_pid {
             Some(pid) => Some(pid),
             None => object_ref_owner_pid(&node.object_ref).await.ok().flatten(),
@@ -3818,6 +4381,18 @@ impl ComputerUseLinux {
             )),
             _ => Ok(()),
         }
+    }
+
+    fn snapshot_pid_for_node(&self, node: &AccessibilityNode) -> Option<u32> {
+        let snapshot = self.last_snapshot.lock().ok()?;
+        // An index from another application's retained observation must not
+        // inherit the last-observed application's pid.
+        snapshot
+            .nodes
+            .iter()
+            .any(|cached| cached.index == node.index && cached.object_ref == node.object_ref)
+            .then_some(snapshot.pid)
+            .flatten()
     }
 
     /// The cached node an element-targeted click or scroll would act on, when
@@ -3903,11 +4478,13 @@ impl ComputerUseLinux {
     }
 
     fn center_for_cached_node(&self, element_index: u32) -> Option<(i32, i32)> {
-        let cached = self.last_snapshot.lock().ok()?;
-        let node = cached
-            .nodes
-            .iter()
-            .find(|node| node.index == element_index)?;
+        let node = self
+            .resolve_cached_node(
+                Some(element_index),
+                &ElementSelector::default(),
+                ElementResolvePurpose::Click,
+            )
+            .ok()?;
         bounds_center(node.bounds.as_ref()?)
     }
 
@@ -3944,6 +4521,7 @@ impl ComputerUseLinux {
                 .iter()
                 .find(|node| node.index == element_index)
                 .cloned()
+                .or_else(|| self.observations.lock().ok()?.node(element_index))
                 .ok_or_else(|| {
                     format!(
                         "No cached accessibility node for element_index {element_index}. Call get_app_state first."
@@ -4558,6 +5136,30 @@ fn prepare_app_state_screenshot(
         };
     }
     prepare_screenshot_payload(raw, options)
+}
+
+fn normalize_window_capture(
+    mut raw: RawScreenshotCapture,
+    window: &WindowInfo,
+) -> Result<RawScreenshotCapture> {
+    if let Some(bounds) = &window.bounds {
+        if bounds.width > 0 && bounds.height > 0 {
+            let (width, height) = (bounds.width, bounds.height);
+            if raw.width != width || raw.height != height {
+                let image = image::load_from_memory(&raw.bytes)?.resize_exact(
+                    width,
+                    height,
+                    image::imageops::FilterType::Triangle,
+                );
+                let mut output = std::io::Cursor::new(Vec::new());
+                image.write_to(&mut output, image::ImageFormat::Png)?;
+                raw.bytes = output.into_inner();
+                raw.width = width;
+                raw.height = height;
+            }
+        }
+    }
+    Ok(raw)
 }
 
 fn ensure_readonly_screenshot_target_is_visible(window: &WindowInfo) -> Result<()> {
@@ -6636,6 +7238,13 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
 
     fn sample_app_state_output(screenshot: Option<&ScreenshotCapture>) -> GetAppStateOutput {
         GetAppStateOutput {
+            tree_changes: TreeChanges {
+                mode: "full".into(),
+                added: vec![],
+                changed: vec![],
+                removed: vec![],
+                total_nodes: 0,
+            },
             app_name_or_bundle_identifier: None,
             window_context: None,
             window_error: None,
@@ -8818,6 +9427,7 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
     #[test]
     fn relative_scroll_translates_coordinates() {
         let mut params = ScrollParams {
+            coordinate_space: CoordinateSpace::default(),
             element_index: None,
             x: Some(10),
             y: Some(20),
@@ -8838,6 +9448,7 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
     #[test]
     fn window_targeted_scroll_defaults_to_window_center() {
         let mut params = ScrollParams {
+            coordinate_space: CoordinateSpace::default(),
             element_index: None,
             x: None,
             y: None,
@@ -8858,6 +9469,7 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
     #[test]
     fn window_targeted_scroll_with_empty_capture_rect_errors() {
         let mut params = ScrollParams {
+            coordinate_space: CoordinateSpace::default(),
             element_index: None,
             x: None,
             y: None,
@@ -8879,6 +9491,7 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
     #[test]
     fn relative_scroll_rejects_out_of_bounds() {
         let mut params = ScrollParams {
+            coordinate_space: CoordinateSpace::default(),
             element_index: None,
             x: Some(801),
             y: Some(20),
@@ -9187,15 +9800,23 @@ mod node_target_scope_tests {
             description: String::new(),
             keybinding: String::new(),
         }];
-        backend
-            .commit_snapshot(std::slice::from_ref(&original), Some(10))
+        let (nodes, _, _) = backend
+            .commit_observation(
+                "original".into(),
+                vec![original],
+                StateMode::Full,
+                false,
+                Some(10),
+            )
             .await;
+        let original = nodes[0].clone();
+        let index = original.index;
         // Model the click/scroll operation: it holds this same lock while its
         // target ownership check awaits and until the action has been resolved.
         let input_guard = Arc::clone(&backend.input_operation_lock).lock_owned().await;
         let checked_node = backend
             .cached_node_for(
-                Some(2),
+                Some(index),
                 &ElementSelector::default(),
                 ElementResolvePurpose::Click,
             )
@@ -9207,7 +9828,13 @@ mod node_target_scope_tests {
             let replacement = cached_node(2, ":1.20/org/a11y/atspi/accessible/99");
             writer_barrier.wait().await;
             writer_backend
-                .commit_snapshot(&[replacement], Some(20))
+                .commit_observation(
+                    "replacement".into(),
+                    vec![replacement],
+                    StateMode::Full,
+                    false,
+                    Some(20),
+                )
                 .await;
         });
         barrier.wait().await;
@@ -9221,14 +9848,14 @@ mod node_target_scope_tests {
             .await
             .is_ok());
         let params = ClickParams {
-            element_index: Some(2),
+            element_index: Some(index),
             ..Default::default()
         };
         assert!(matches!(backend.resolve_click_target(&params).unwrap(),
             ClickTarget::PrimaryAction { object_ref, .. } if object_ref == original.object_ref));
         assert_eq!(
             backend
-                .resolve_optional_target_point(None, None, Some(2))
+                .resolve_optional_target_point(None, None, Some(index))
                 .unwrap(),
             Some((60, 40))
         );
@@ -9240,7 +9867,7 @@ mod node_target_scope_tests {
         ] {
             assert_eq!(
                 backend
-                    .resolve_object_ref(Some(2), None, &ElementSelector::default(), purpose)
+                    .resolve_object_ref(Some(index), None, &ElementSelector::default(), purpose)
                     .unwrap(),
                 original.object_ref
             );
@@ -9253,6 +9880,60 @@ mod node_target_scope_tests {
             snapshot.nodes[0].object_ref,
             ":1.20/org/a11y/atspi/accessible/99"
         );
+    }
+
+    #[tokio::test]
+    async fn retained_observation_does_not_inherit_last_snapshot_pid() {
+        let backend = ComputerUseLinux::default();
+        let mut first = cached_node(2, ":1.9/org/a11y/atspi/accessible/42");
+        first.bounds = Some(Bounds {
+            x: 10,
+            y: 20,
+            width: 100,
+            height: 40,
+        });
+        let (nodes, _, _) = backend
+            .commit_observation(
+                "first".into(),
+                vec![first],
+                StateMode::Full,
+                false,
+                Some(10),
+            )
+            .await;
+        let first = nodes[0].clone();
+        assert_eq!(backend.snapshot_pid_for_node(&first), Some(10));
+        let (nodes, _, _) = backend
+            .commit_observation(
+                "second".into(),
+                vec![cached_node(2, ":1.20/org/a11y/atspi/accessible/99")],
+                StateMode::Full,
+                false,
+                Some(20),
+            )
+            .await;
+        assert_eq!(backend.snapshot_pid_for_node(&nodes[0]), Some(20));
+        assert_eq!(backend.snapshot_pid_for_node(&first), None);
+        assert_eq!(
+            backend
+                .resolve_cached_node(
+                    Some(first.index),
+                    &ElementSelector::default(),
+                    ElementResolvePurpose::Click
+                )
+                .unwrap()
+                .object_ref,
+            first.object_ref
+        );
+        assert_eq!(backend.center_for_cached_node(first.index), Some((60, 40)));
+        backend.reset_session().await;
+        assert!(backend
+            .resolve_cached_node(
+                Some(first.index),
+                &ElementSelector::default(),
+                ElementResolvePurpose::Click
+            )
+            .is_err());
     }
 
     #[test]
